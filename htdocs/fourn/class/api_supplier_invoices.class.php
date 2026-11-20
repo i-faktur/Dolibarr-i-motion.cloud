@@ -3,7 +3,7 @@
  * Copyright (C) 2016	Laurent Destailleur		<eldy@users.sourceforge.net>
  * Copyright (C) 2023	Joachim Kueter			<git-jk@bloxera.com>
  * Copyright (C) 2024-2025	MDW					<mdeweerd@users.noreply.github.com>
- * Copyright (C) 2024	Frédéric France			<frederic.france@free.fr>
+ * Copyright (C) 2024-2025  Frédéric France			<frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -231,7 +231,7 @@ class SupplierInvoices extends DolibarrApi
 	public function post($request_data = null)
 	{
 		if (!DolibarrApiAccess::$user->hasRight("fournisseur", "facture", "creer")) {
-			throw new RestException(403, "Insuffisant rights");
+			throw new RestException(403, "Insufficiant rights");
 		}
 
 		if (!is_array($request_data)) {
@@ -302,7 +302,7 @@ class SupplierInvoices extends DolibarrApi
 			}
 			if ($field == 'array_options' && is_array($value)) {
 				foreach ($value as $index => $val) {
-					$this->invoice->array_options[$index] = $this->_checkValForAPI($field, $val, $this->invoice);
+					$this->invoice->array_options[$index] = $this->_checkValExtrafieldsForAPI($index, $val, $this->invoice);
 				}
 				continue;
 			}
@@ -343,8 +343,11 @@ class SupplierInvoices extends DolibarrApi
 			throw new RestException(404, 'Supplier invoice not found');
 		}
 
-		if ($this->invoice->delete(DolibarrApiAccess::$user) < 0) {
+		$result = $this->invoice->delete(DolibarrApiAccess::$user);
+		if ($result < 0) {
 			throw new RestException(500, 'Error when deleting invoice');
+		} elseif ($result == 0) {
+			throw new RestException(403, 'Invoice not erasable');
 		}
 
 		return array(
@@ -562,7 +565,15 @@ class SupplierInvoices extends DolibarrApi
 		$amounts[$id] = $paymentamount;
 
 		// Multicurrency
-		$newvalue = (float) price2num($this->invoice->multicurrency_total_ttc, 'MT');
+		// getWay() switches the payment to the invoice currency as soon as a multicurrency amount is set, so
+		// this value must match the partial amount, not always the full invoice TTC. When a partial amount was
+		// requested, convert it at the invoice rate (multicurrency_total_ttc / total_ttc); otherwise use the
+		// full multicurrency TTC (full payment).
+		if (null !== $amount && $amount > 0 && !empty($this->invoice->total_ttc)) {
+			$newvalue = (float) price2num($paymentamount * $this->invoice->multicurrency_total_ttc / $this->invoice->total_ttc, 'MT');
+		} else {
+			$newvalue = (float) price2num($this->invoice->multicurrency_total_ttc, 'MT');
+		}
 		$multicurrency_amounts[$id] = $newvalue;
 
 		// Creation of payment line
@@ -573,7 +584,7 @@ class SupplierInvoices extends DolibarrApi
 		$paiement->paiementid = $payment_mode_id;
 		$paiement->paiementcode = (string) dol_getIdFromCode($this->db, (string) $payment_mode_id, 'c_paiement', 'id', 'code', 1);
 		$paiement->num_payment = $num_payment;
-		$paiement->note_public = $comment;
+		$paiement->note_private = $comment;
 
 		$paiement_id = $paiement->create(DolibarrApiAccess::$user, ($closepaidinvoices == 'yes' ? 1 : 0)); // This include closing invoices
 		if ($paiement_id < 0) {
@@ -595,6 +606,96 @@ class SupplierInvoices extends DolibarrApi
 	}
 
 	/**
+	 * Sets a supplier invoice as paid
+	 *
+	 * @param   int     $id             Supplier invoice ID
+	 * @param   string  $close_code     Optional close code (e.g. discount/escompte case)
+	 * @param   string  $close_note     Optional close note/comment
+	 * @return  Object                  Object with cleaned properties
+	 *
+	 * @url POST {id}/settopaid
+	 *
+	 * @throws RestException 304
+	 * @throws RestException 403
+	 * @throws RestException 404
+	 * @throws RestException 500 System error
+	 */
+	public function settopaid($id, $close_code = '', $close_note = '')
+	{
+		if (!DolibarrApiAccess::$user->hasRight('fournisseur', 'facture', 'creer')) {
+			throw new RestException(403);
+		}
+
+		$result = $this->invoice->fetch($id);
+		if (!$result) {
+			throw new RestException(404, 'Supplier invoice not found');
+		}
+
+		if (!DolibarrApi::_checkAccessToResource('fournisseur', $this->invoice->id, 'facture_fourn', 'facture')) {
+			throw new RestException(403, 'Access not allowed for login ' . DolibarrApiAccess::$user->login);
+		}
+
+		$result = $this->invoice->setPaid(DolibarrApiAccess::$user, $close_code, $close_note);
+		if ($result == 0) {
+			throw new RestException(304, 'Error nothing done. Maybe object is already paid or not payable.');
+		}
+		if ($result < 0) {
+			throw new RestException(500, 'Error: ' . $this->invoice->error);
+		}
+
+		$result = $this->invoice->fetch($id);
+		if (!$result) {
+			throw new RestException(404, 'Supplier invoice not found');
+		}
+
+		return $this->_cleanObjectDatas($this->invoice);
+	}
+
+	/**
+	 * Sets a supplier invoice as unpaid
+	 *
+	 * @param   int     $id             Supplier invoice ID
+	 * @return  Object                  Object with cleaned properties
+	 *
+	 * @url POST {id}/settounpaid
+	 *
+	 * @throws RestException 304
+	 * @throws RestException 403
+	 * @throws RestException 404
+	 * @throws RestException 500 System error
+	 */
+	public function settounpaid($id)
+	{
+		if (!DolibarrApiAccess::$user->hasRight('fournisseur', 'facture', 'creer')) {
+			throw new RestException(403);
+		}
+
+		$result = $this->invoice->fetch($id);
+		if (!$result) {
+			throw new RestException(404, 'Supplier invoice not found');
+		}
+
+		if (!DolibarrApi::_checkAccessToResource('fournisseur', $this->invoice->id, 'facture_fourn', 'facture')) {
+			throw new RestException(403, 'Access not allowed for login ' . DolibarrApiAccess::$user->login);
+		}
+
+		$result = $this->invoice->setUnpaid(DolibarrApiAccess::$user);
+		if ($result == 0) {
+			throw new RestException(304, 'Nothing done.');
+		}
+		if ($result < 0) {
+			throw new RestException(500, 'Error: ' . $this->invoice->error);
+		}
+
+		$result = $this->invoice->fetch($id);
+		if (!$result) {
+			throw new RestException(404, 'Supplier invoice not found');
+		}
+
+		return $this->_cleanObjectDatas($this->invoice);
+	}
+
+	/**
 	 * Get lines of a supplier invoice
 	 *
 	 * @param int   $id             Id of supplier invoice
@@ -610,7 +711,7 @@ class SupplierInvoices extends DolibarrApi
 	 */
 	public function getLines($id)
 	{
-		if (!DolibarrApiAccess::$user->hasRight("fournisseur", "facture", "creer")) {
+		if (!DolibarrApiAccess::$user->hasRight("fournisseur", "facture", "lire")) {
 			throw new RestException(403);
 		}
 		if (!DolibarrApi::_checkAccessToResource('fournisseur', $id, 'facture_fourn', 'facture')) {
@@ -684,7 +785,9 @@ class SupplierInvoices extends DolibarrApi
 			$request_data->info_bits,
 			$request_data->price_base_type ? $request_data->price_base_type : 'HT',
 			$request_data->product_type,
-			$request_data->rang,
+			// -1 is the "append at the end" value of addline(). An absent rang is null, which empty() turns into 0,
+			// so without this every line added through the API is stored with rang 0 instead of being appended.
+			isset($request_data->rang) ? $request_data->rang : -1,
 			0,
 			$request_data->array_options,
 			$request_data->fk_unit,
@@ -731,6 +834,14 @@ class SupplierInvoices extends DolibarrApi
 		$result = $this->invoice->fetch($id);
 		if (!$result) {
 			throw new RestException(404, 'Supplier invoice not found');
+		}
+
+		$invoiceline = new SupplierInvoiceLine($this->db);
+		if ($invoiceline->fetch($lineid) <= 0) {
+			throw new RestException(404, 'Supplier invoice line not found');
+		}
+		if ($invoiceline->fk_facture_fourn != $this->invoice->id) {
+			throw new RestException(403, 'Line does not belong to this supplier invoice');
 		}
 
 		$request_data = (object) $request_data;
@@ -805,7 +916,13 @@ class SupplierInvoices extends DolibarrApi
 			throw new RestException(404, 'Supplier invoice not found');
 		}
 
-		// TODO Check the lineid $lineid is a line of object
+		$invoiceline = new SupplierInvoiceLine($this->db);
+		if ($invoiceline->fetch($lineid) <= 0) {
+			throw new RestException(404, 'Supplier invoice line not found');
+		}
+		if ($invoiceline->fk_facture_fourn != $this->invoice->id) {
+			throw new RestException(403, 'Line does not belong to this supplier invoice');
+		}
 
 		$updateRes = $this->invoice->deleteLine($lineid);
 		if ($updateRes > 0) {
@@ -823,9 +940,12 @@ class SupplierInvoices extends DolibarrApi
 	// phpcs:disable PEAR.NamingConventions.ValidFunctionName.PublicUnderscore
 	/**
 	 * Clean sensible object datas
+	 * @phpstan-template T
 	 *
 	 * @param   Object  $object     Object to clean
 	 * @return  Object              Object with cleaned properties
+	 * @phpstan-param T $object
+	 * @phpstan-return T
 	 */
 	protected function _cleanObjectDatas($object)
 	{

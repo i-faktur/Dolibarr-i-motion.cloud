@@ -1,8 +1,9 @@
 <?php
-/* Copyright (C) 2010-2014 Laurent Destailleur  <eldy@users.sourceforge.net>
- * Copyright (C) 2015	   Juanjo Menent		<jmenent@2byte.es>
- * Copyright (C) 2023 Alexandre Janniaux   <alexandre.janniaux@gmail.com>
- * Copyright (C) 2025		MDW					<mdeweerd@users.noreply.github.com>
+/* Copyright (C) 2010-2014 	Laurent Destailleur  	<eldy@users.sourceforge.net>
+ * Copyright (C) 2015	   	Juanjo Menent			<jmenent@2byte.es>
+ * Copyright (C) 2023 		Alexandre Janniaux   	<alexandre.janniaux@gmail.com>
+ * Copyright (C) 2025		MDW						<mdeweerd@users.noreply.github.com>
+ * Copyright (C) 2025       Frédéric France         <frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -270,9 +271,72 @@ class FunctionsLibTest extends CommonClassTest
 		$sql = forgeSQLFromUniversalSearchCriteria($filter);
 		$this->assertEquals(" AND ((t.fk_soc IN ('1','2=b')))", $sql);
 
+		// Test use of forbiddenstring
+		$errorstr = '';
+		$filter = "(t.fk_soc:IN:'1','2=b')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr, 0, 0, 0, array('aaa'));
+		$this->assertEquals(" AND ((t.fk_soc IN ('1','2=b')))", $sql);
+
+		$filter = "(t.api_key:IN:'1','2=b')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr, 0, 0, 0, array('aaa'));
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		$filter = "(t.fk_soc:IN:'1','2=b')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr, 0, 0, 0, array('fk_soc'));
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		// Test that a forbidden field with 2 levels of prefix (dbprefix.table.field) is also forbidden (protection against CVE-2026-89012 bypass)
+		$filter = "(dolibarr.u.pass_crypted:like:'ZZZZ%')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr);
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		$filter = "(DOLIBARR.U.API_KEY:like:'ZZZZ%')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr);
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		$filter = "(mydb.t.pass_temp:like:'ZZZZ%')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr);
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		$filter = "(u.pass_temp:like:'ZZZZ%')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr);
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		// Test that any other field with 2 levels of prefix is neutralized too (no db prefix existence oracle, no SQL error)
+		$filter = "(dolibarr.t.ref:like:'SO-%')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr);
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		// Test that a field forbidden by the caller is also forbidden with 2 levels of prefix
+		$filter = "(dolibarr.u.salary:like:'1%')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr, 0, 0, 0, array('salary'));
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		// Test that valid filters with a single level of prefix still work
+		$filter = "(u.api_key:like:'ZZZZ%')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr, 0, 0, 0, array('ref'));
+		$this->assertEquals(" AND (1=1)", $sql);
+
+		$filter = "(t.ref:like:'SO-%')";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter, $errorstr, 0, 0, 0, array('salary'));
+		$this->assertEquals(" AND ((t.ref LIKE 'SO-%'))", $sql);
+
+
+		global $dolibarr_allow_unsecured_select_in_extrafields_filter;
+
+		// If $dolibarr_allow_unsecured_select_in_extrafields_filter is set
+		$dolibarr_allow_unsecured_select_in_extrafields_filter = 1;
+
 		$filter = "(t.fk_soc:IN:SELECT rowid FROM llx_societe WHERE fournisseur = 1)";
 		$sql = forgeSQLFromUniversalSearchCriteria($filter);
 		$this->assertEquals(" AND ((t.fk_soc IN (SELECT rowid FROM llx_societe WHERE fournisseur = 1)))", $sql);
+
+		// If $dolibarr_allow_unsecured_select_in_extrafields_filter is unset (default)
+		$dolibarr_allow_unsecured_select_in_extrafields_filter = 0;
+
+		$filter = "(t.fk_soc:IN:SELECT rowid FROM llx_societe WHERE fournisseur = 1)";
+		$sql = forgeSQLFromUniversalSearchCriteria($filter);
+		$this->assertEquals(" AND ((t.fk_soc IN (SELECTrowidFROMllx_societeWHEREfournisseur1)))", $sql);
 
 		return true;
 	}
@@ -288,6 +352,7 @@ class FunctionsLibTest extends CommonClassTest
 		global $db;
 
 		$newproduct1 = new Product($db);
+		$newproduct1->initAsSpecimen();
 
 		print __METHOD__." this->savdb has type ".(is_resource($db->db) ? get_resource_type($db->db) : (is_object($db->db) ? 'object' : 'unknown'))."\n";
 		print __METHOD__." newproduct1->db->db has type ".(is_resource($newproduct1->db->db) ? get_resource_type($newproduct1->db->db) : (is_object($newproduct1->db->db) ? 'object' : 'unknown'))."\n";
@@ -300,11 +365,25 @@ class FunctionsLibTest extends CommonClassTest
 		print __METHOD__." newproduct1->db->db has type ".(is_resource($newproduct1->db->db) ? get_resource_type($newproduct1->db->db) : (is_object($newproduct1->db->db) ? 'object' : 'unknown'))."\n";
 		$this->assertEquals($db->connected, 1, 'Savdb is connected');
 		$this->assertNotNull($newproduct1->db->db, 'newproduct1->db is not null');
+	}
 
-		//$newproductcloned2 = dol_clone($newproduct1, 2);
-		//var_dump($newproductcloned2);
-		//print __METHOD__." newproductcloned1->db must be null\n";
-		//$this->assertNull($newproductcloned1->db, 'newproductcloned1->db is null');
+	/**
+	 * testDolCloneInArray
+	 *
+	 * @return void
+	 */
+	public function testDolCloneInArray()
+	{
+		global $db;
+
+		$newproduct1 = new Product($db);
+		$newproduct1->initAsSpecimen();
+
+		$newproductclonedinarray1 = dol_clone_in_array($newproduct1);
+
+		print __METHOD__." newproductclonedinarray1[db] must be null\n";
+		$this->assertNull((empty($newproductclonedinarray1['db']) ? null : 'defined'), 'newproductclonedinarray1[db] is null');
+		$this->assertNotNull($newproduct1->db->db, 'newproduct1->db is not null');
 	}
 
 	/**
@@ -386,7 +465,7 @@ class FunctionsLibTest extends CommonClassTest
 		print __METHOD__." ".$input." result=".$result."\n";
 		$this->assertEquals(0, $result);
 
-		$input = "usace.army.mil";
+		$input = "microsoft.com";
 		$result = isValidMXRecord($input);
 		print __METHOD__." ".$input." result=".$result."\n";
 		$this->assertEquals(1, $result);
@@ -944,9 +1023,9 @@ class FunctionsLibTest extends CommonClassTest
 	{
 		// Text not already HTML
 
-		$input = "A string\nwith a à ä é è ë ï ü ö ÿ, &, < and >.";
+		$input = "A string\nwith a à ä é è ë ï ü ö ÿ É É, &, < and >."; // the second É is different than the first one
 		$after = dol_string_unaccent($input);
-		$this->assertEquals("A string\nwith a a a e e e i u o y, &, < and >.", $after);
+		$this->assertEquals("A string\nwith a a a e e e i u o y E E, &, < and >.", $after);
 	}
 
 
@@ -1114,12 +1193,15 @@ class FunctionsLibTest extends CommonClassTest
 	{
 		$input = "x&<b>#</b>,\"'";    // " will be converted into '
 		$result = dol_escape_js($input);
+		print __METHOD__." result=".$result."\n";
 		$this->assertEquals("x&<b>#</b>,\'\'", $result, "Test mode=0");
 
 		$result = dol_escape_js($input, 1);
+		print __METHOD__." result=".$result."\n";
 		$this->assertEquals("x&<b>#</b>,\"\'", $result, "Test mode=1");
 
 		$result = dol_escape_js($input, 2);
+		print __METHOD__." result=".$result."\n";
 		$this->assertEquals("x&<b>#</b>,\\\"'", $result, "Test mode=2");
 	}
 
@@ -1131,6 +1213,8 @@ class FunctionsLibTest extends CommonClassTest
 	 */
 	public function testDolEscapeHtmlTag()
 	{
+		print __METHOD__."\n";
+
 		$input = 'x&<b>#</b>,"';    // & and " are converted into html entities, <b> are removed
 		$result = dol_escape_htmltag($input);
 		$this->assertEquals('x&amp;#,&quot;', $result);
@@ -1163,8 +1247,19 @@ class FunctionsLibTest extends CommonClassTest
 		<a href="mailto:abc+def@domain.com" id="sigEmail" style="color:#428BCA;">abc+def@domain.com</a><br>
 		<a href="https://www.another-domain.com" id="sigWebsite" style="color:#428BCA;">https://www.another-domain.com</a><br>
 		</div>';
-
 		$result = dol_escape_htmltag($input, 1, 1, 'common');
+		$this->assertEquals($input, $result);
+
+		// The same plus the tag 'code'
+		$input = '<div style="float:left; margin-left:0px; margin-right:5px">
+		<img id="sigPhoto" src="https://www.domain.com/aaa.png" style="height:65px; width:65px" />
+		</div>
+		<div style="margin-left:74px"><strong>A text here</strong> and more<br>
+		<a href="mailto:abc+def@domain.com" id="sigEmail" style="color:#428BCA;">abc+def@domain.com</a><br>
+		<a href="https://www.another-domain.com" id="sigWebsite" style="color:#428BCA;">https://www.another-domain.com</a><br>
+		<code>abc</code>
+		</div>';
+		$result = dol_escape_htmltag($input, 1, 1, 'common,code');
 		$this->assertEquals($input, $result);
 	}
 
@@ -1177,10 +1272,13 @@ class FunctionsLibTest extends CommonClassTest
 	public function testDolFormatAddress()
 	{
 		global $conf,$user,$langs,$db;
+
 		$conf = $this->savconf;
 		$user = $this->savuser;
 		$langs = $this->savlangs;
 		$db = $this->savdb;
+
+		print __METHOD__."\n";
 
 		$object = new Societe($db);
 		$object->initAsSpecimen();
@@ -1220,6 +1318,8 @@ class FunctionsLibTest extends CommonClassTest
 		$langs = $this->savlangs;
 		$db = $this->savdb;
 
+		print __METHOD__."\n";
+
 		$object = new Societe($db);
 		$object->initAsSpecimen();
 
@@ -1238,6 +1338,23 @@ class FunctionsLibTest extends CommonClassTest
 		$object->country_code = 'CA';
 		$phone = dol_print_phone('1234567890', $object->country_code, 0, 0, 0, ' ');
 		$this->assertEquals('<span class="paddingright">(123) 456-7890</span>', $phone, 'Phone for CA 1');
+
+		// Every digit must appear exactly once, in order, whatever the country format
+		$object->country_code = 'JO';
+		$phone = dol_print_phone('+96212345678', $object->country_code, 0, 0, 0, ' ');
+		$this->assertEquals('<span class="paddingright">+962 1 234 56 78</span>', $phone, 'Phone for JO 1');
+
+		$object->country_code = 'PE';
+		$phone = dol_print_phone('987654321', $object->country_code, 0, 0, 0, ' ');
+		$this->assertEquals('<span class="paddingright">987 654 321</span>', $phone, 'Phone for PE 1');
+
+		$object->country_code = 'PE';
+		$phone = dol_print_phone('+5111234567', $object->country_code, 0, 0, 0, ' ');
+		$this->assertEquals('<span class="paddingright">+511 123 4567</span>', $phone, 'Phone for PE 2');
+
+		$object->country_code = 'PE';
+		$phone = dol_print_phone('+51987654321', $object->country_code, 0, 0, 0, ' ');
+		$this->assertEquals('<span class="paddingright">+51 987 654 321</span>', $phone, 'Phone for PE 3');
 	}
 
 
@@ -1306,21 +1423,34 @@ class FunctionsLibTest extends CommonClassTest
 	/**
 	 * testVerifCond
 	 *
-	 * @dataProvider verifCondDataProvider
-	 *
-	 * @param string $cond     Condition to test using verifCond
-	 * @param string $expected Expected outcome of verifCond
+	 * @return	void
+	 */
+	public function testVerifCond()
+	{
+		foreach ($this->verifCondDataProvider() as $case) {
+			list($cond, $expected) = $case;
+			if ($expected) {
+				$this->assertTrue(verifCond($cond));
+			} else {
+				$this->assertFalse(verifCond($cond));
+			}
+		}
+	}
+
+	/**
+	 * testVerifCondOnMethods
 	 *
 	 * @return	void
 	 */
-	public function testVerifCond($cond, $expected)
+	public function testVerifCondOnMethods()
 	{
-		if ($expected) {
-			$this->assertTrue(verifCond($cond));
-		} else {
-			$this->assertFalse(verifCond($cond));
-		}
+		$a = verifCond('$user->hasRight("facture", "read")');
+		$this->assertTrue($a);
+
+		$a = verifCond('$user->hasMethodKo("facture", "read")');
+		$this->assertFalse($a);
 	}
+
 
 	/**
 	 * testGetDefaultTva
@@ -1377,26 +1507,32 @@ class FunctionsLibTest extends CommonClassTest
 		// Not tested
 
 		// Test RULE 1
+		print __METHOD__." rule=RULE 1\n";
 		$vat = get_default_tva($companyfrnovat, $companymc, 0);
 		$this->assertEquals(0, $vat, 'RULE 1');
 
 		// Test RULE 2 (FR-FR)
+		print __METHOD__." rule=RULE 2 FR-FR\n";
 		$vat = get_default_tva($companyfr, $companyfr, 0);
-		$this->assertEquals(20, $vat, 'RULE 2');
+		$this->assertEquals(20, $vat, 'RULE 2 FR-FR - Check that the dictionary is set to have default VAT to 20');
 
 		// Test RULE 2 (FR-MC)
+		print __METHOD__." rule=RULE 2 FR-MC\n";
 		$vat = get_default_tva($companyfr, $companymc, 0);
-		$this->assertEquals(20, $vat, 'RULE 2');
+		$this->assertEquals(20, $vat, 'RULE 2 FR-MC');
 
 		// Test RULE 3 (FR-DE company)
+		print __METHOD__." rule=RULE 3 FR-DE\n";
 		$vat = get_default_tva($companyfr, $companyit, 0);
 		$this->assertEquals(0, $vat, 'RULE 3');
 
 		// Test RULE 4 (FR-DE not a company)
+		print __METHOD__." rule=RULE 4 FR-DE\n";
 		$vat = get_default_tva($companyfr, $notcompanyde, 0);
 		$this->assertEquals(20, $vat, 'RULE 4');
 
 		// Test RULE 5 (FR-US)
+		print __METHOD__." rule=RULE 5 FR-US\n";
 		$vat = get_default_tva($companyfr, $companyus, 0);
 		$this->assertEquals(0, $vat, 'RULE 5');
 
@@ -1405,24 +1541,107 @@ class FunctionsLibTest extends CommonClassTest
 		$conf->global->SERVICE_ARE_ECOMMERCE_200238EC = 1;
 
 		// Test RULE 1 (FR-US)
+		print __METHOD__." rule=RULE 1 ECOMMERCE_200238EC FR-US\n";
 		$vat = get_default_tva($companyfr, $companyus, 0);
 		$this->assertEquals(0, $vat, 'RULE 1 ECOMMERCE_200238EC');
 
 		// Test RULE 2 (FR-FR)
+		print __METHOD__." rule=RULE 2 ECOMMERCE_200238EC FR-FR\n";
 		$vat = get_default_tva($companyfr, $companyfr, 0);
 		$this->assertEquals(20, $vat, 'RULE 2 ECOMMERCE_200238EC');
 
 		// Test RULE 3 (FR-DE company)
+		print __METHOD__." rule=RULE 3 ECOMMERCE_200238EC FR-DE company\n";
 		$vat = get_default_tva($companyfr, $companyde, 0);
 		$this->assertEquals(0, $vat, 'RULE 3 ECOMMERCE_200238EC');
 
 		// Test RULE 4 (FR-DE not a company)
+		print __METHOD__." rule=RULE 4 ECOMMERCE_200238EC FR-DE not company\n";
 		$vat = get_default_tva($companyfr, $notcompanyde, 0);
 		$this->assertEquals(19, $vat, 'RULE 4 ECOMMERCE_200238EC');
 
 		// Test RULE 5 (FR-US)
+		print __METHOD__." rule=RULE 5 ECOMMERCE_200238EC FR-US\n";
 		$vat = get_default_tva($companyfr, $companyus, 0);
 		$this->assertEquals(0, $vat, 'RULE 5 ECOMMERCE_200238EC');
+	}
+
+	/**
+	 * testGetDefaultTvaForBuyerState
+	 *
+	 * Covers VATRULE 2: when the buyer department (state/province) has a VAT rule in the
+	 * dictionary, it becomes the default VAT rate. Also checks that only active rates of the
+	 * current entity are considered (an inactive rate must never be selected).
+	 *
+	 * @return	void
+	 */
+	public function testGetDefaultTvaForBuyerState()
+	{
+		global $conf,$user,$langs,$db;
+		$this->savconf = $conf;
+		$this->savuser = $user;
+		$this->savlangs = $langs;
+		$this->savdb = $db;
+
+		// Make sure the ecommerce directive left on by a previous test does not interfere with VATRULE 2
+		unset($conf->global->SERVICE_ARE_ECOMMERCE_200238EC);
+
+		// Seller subject to VAT in France
+		$companyfr = new Societe($db);
+		$companyfr->country_code = 'FR';
+		$companyfr->tva_assuj = 1;
+		$companyfr->tva_intra = 'FR9999';
+
+		// Find an existing department (state/province) to attach a VAT rule to, and the France country id
+		$stateid = 0;
+		$sql = "SELECT rowid FROM ".$db->prefix()."c_departements WHERE code_departement = '75'";
+		$resql = $db->query($sql);
+		if ($resql && $db->num_rows($resql)) {
+			$objdep = $db->fetch_object($resql);
+			$stateid = (int) $objdep->rowid;
+		}
+		if (empty($stateid)) {
+			$this->markTestSkipped('No department found in c_departements to run the VATRULE 2 test.');
+			return;
+		}
+
+		$frpaysid = 0;
+		$sql = "SELECT rowid FROM ".$db->prefix()."c_country WHERE code = 'FR'";
+		$resql = $db->query($sql);
+		if ($resql && $db->num_rows($resql)) {
+			$objpays = $db->fetch_object($resql);
+			$frpaysid = (int) $objpays->rowid;
+		}
+
+		// Insert two temporary VAT rules attached to that department:
+		//  - an ACTIVE one at 12 that must be selected
+		//  - an INACTIVE one at 25 (higher, so it would win the taux DESC sort) that must be ignored
+		$db->query("DELETE FROM ".$db->prefix()."c_tva WHERE code IN ('TESTVATACT', 'TESTVATINACT')");
+		$db->query("INSERT INTO ".$db->prefix()."c_tva (entity, fk_pays, fk_department_buyer, code, type_vat, taux, use_default, recuperableonly, active) VALUES (1, ".$frpaysid.", ".$stateid.", 'TESTVATACT', 0, 12, 0, 0, 1)");
+		$db->query("INSERT INTO ".$db->prefix()."c_tva (entity, fk_pays, fk_department_buyer, code, type_vat, taux, use_default, recuperableonly, active) VALUES (1, ".$frpaysid.", ".$stateid.", 'TESTVATINACT', 0, 25, 0, 0, 0)");
+
+		// Buyer located in that department
+		$buyer = new Societe($db);
+		$buyer->country_code = 'FR';
+		$buyer->tva_assuj = 1;
+		$buyer->state_id = $stateid;
+
+		// Case 1: an active department rate exists -> VATRULE 2 returns it, ignoring the inactive (higher) one
+		$vatactive = get_default_tva($companyfr, $buyer, 0);
+
+		// Case 2: no active department rate remains -> VATRULE 2 must not fire on the inactive rows
+		$db->query("UPDATE ".$db->prefix()."c_tva SET active = 0 WHERE code = 'TESTVATACT'");
+		$vatinactive = get_default_tva($companyfr, $buyer, 0);
+
+		// Cleanup fixtures before asserting so a failed assertion never leaves test data behind
+		$db->query("DELETE FROM ".$db->prefix()."c_tva WHERE code IN ('TESTVATACT', 'TESTVATINACT')");
+
+		// The active department rate is selected...
+		$this->assertStringContainsString('TESTVATACT', $vatactive, 'VATRULE 2 must select the active department VAT rate');
+		// ...and the inactive one is never selected (this is the fix)
+		$this->assertStringNotContainsString('TESTVATINACT', $vatactive, 'An inactive department VAT rate must not be selected by VATRULE 2');
+		// When no active department rate remains, VATRULE 2 does not select the (now inactive) rate either
+		$this->assertStringNotContainsString('TESTVATACT', $vatinactive, 'An inactive department VAT rate must not be selected by VATRULE 2');
 	}
 
 	/**
@@ -1479,24 +1698,28 @@ class FunctionsLibTest extends CommonClassTest
 		$companyus->localtax2_assuj = 0;
 
 		// Test RULE FR-MC
+		print __METHOD__." rule=FR-MC\n";
 		$vat1 = get_default_localtax($companyfrnovat, $companymc, 1, 0);
 		$vat2 = get_default_localtax($companyfrnovat, $companymc, 2, 0);
 		$this->assertEquals(0, $vat1);
 		$this->assertEquals(0, $vat2);
 
 		// Test RULE ES-ES
+		print __METHOD__." rule=ES-ES\n";
 		$vat1 = get_default_localtax($companyes, $companyes, 1, 0);
 		$vat2 = get_default_localtax($companyes, $companyes, 2, 0);
 		$this->assertEquals($vat1, 5.2);
 		$this->assertStringStartsWith((string) $vat2, '-19:-15:-9');       // Can be -19 (old version) or '-19:-15:-9' (new setup)
 
 		// Test RULE ES-IT
+		print __METHOD__." rule=ES-IT company\n";
 		$vat1 = get_default_localtax($companyes, $companyit, 1, 0);
 		$vat2 = get_default_localtax($companyes, $companyit, 2, 0);
 		$this->assertEquals(0, $vat1);
 		$this->assertEquals(0, $vat2);
 
-		// Test RULE ES-IT
+		// Test RULE ES-not IT
+		print __METHOD__." rule=ES-IT not company\n";
 		$vat1 = get_default_localtax($companyes, $notcompanyit, 1, 0);
 		$vat2 = get_default_localtax($companyes, $notcompanyit, 2, 0);
 		$this->assertEquals(0, $vat1);
@@ -1506,6 +1729,7 @@ class FunctionsLibTest extends CommonClassTest
 		// Not tested
 
 		// Test RULE ES-US
+		print __METHOD__." rule=ES-US\n";
 		$vat1 = get_default_localtax($companyes, $companyus, 1, 0);
 		$vat2 = get_default_localtax($companyes, $companyus, 2, 0);
 		$this->assertEquals(0, $vat1);
@@ -1805,6 +2029,12 @@ class FunctionsLibTest extends CommonClassTest
 		print __METHOD__." ".$newstring."\n";
 		$this->assertEquals($newstring, "This is a text with<br>\nNew line<br>\nThen<br>\nNo html<br>\nThen<br>\n<b>HTML</b>", 'Test on make_substitutions with full conversion of text accepted');
 
+
+		// Try mix HTML into not HTML but no replaement is done
+		$newstring = make_substitutions('¿Necesitas ayuda para empezar con GLPI?', array('__SENDEREMAIL_SIGNATURE__' => '<br><strong>HTML content</strong>'), $langs, 1);
+		print __METHOD__." ".$newstring."\n";
+		$this->assertEquals($newstring, '¿Necesitas ayuda para empezar con GLPI?');
+
 		return true;
 	}
 
@@ -1907,6 +2137,35 @@ class FunctionsLibTest extends CommonClassTest
 		$result = fetchObjectByElement(0, 'product');
 
 		$this->assertTrue(is_object($result));
+
+		$hasvariantsmodule = array_key_exists('variants', $conf->modules);
+		$originalvariantsmodule = $hasvariantsmodule ? $conf->modules['variants'] : null;
+
+		try {
+			$conf->modules['variants'] = 1;
+
+			$productattribute = getElementProperties('product_attribute');
+			$this->assertSame('variants', $productattribute['module']);
+			$this->assertSame('variants/class', $productattribute['classpath']);
+			$this->assertSame('ProductAttribute', $productattribute['classfile']);
+			$this->assertSame('ProductAttribute', $productattribute['classname']);
+
+			$productattributevalue = getElementProperties('product_attribute_value');
+			$this->assertSame('variants', $productattributevalue['module']);
+			$this->assertSame('variants/class', $productattributevalue['classpath']);
+			$this->assertSame('ProductAttributeValue', $productattributevalue['classfile']);
+			$this->assertSame('ProductAttributeValue', $productattributevalue['classname']);
+			$this->assertSame('product_attribute', $productattributevalue['parent_element']);
+
+			$this->assertInstanceOf(ProductAttribute::class, fetchObjectByElement(0, 'product_attribute'));
+			$this->assertInstanceOf(ProductAttributeValue::class, fetchObjectByElement(0, 'product_attribute_value'));
+		} finally {
+			if ($hasvariantsmodule) {
+				$conf->modules['variants'] = $originalvariantsmodule;
+			} else {
+				unset($conf->modules['variants']);
+			}
+		}
 
 		return true;
 	}
@@ -2013,5 +2272,45 @@ class FunctionsLibTest extends CommonClassTest
 		$result = dolExplodeKeepIfQuotes("1 0");
 		$this->assertEquals("1", $result[0]);
 		$this->assertEquals("0", $result[1]);
+	}
+
+
+
+	/**
+	 * testDolSanitizePathName
+	 *
+	 * @return void
+	 */
+	public function testDolSanitizePathName()
+	{
+		global $conf,$user,$langs,$db;
+		$conf = $this->savconf;
+		$user = $this->savuser;
+		$langs = $this->savlangs;
+		$db = $this->savdb;
+
+		$s = '../aéa/bbb ccc/ddd';
+		$result = dol_sanitizePathName($s);
+		$this->assertEquals('_/aéa/bbb ccc/ddd', $result);
+
+		$s = '../aéa/bbb ccc/ddd';
+		$result = dol_sanitizePathName($s, '_', 1);
+		$this->assertEquals('_/aea/bbb ccc/ddd', $result);
+
+		$s = 'C:\ccc/d\'d"d$';
+		$result = dol_sanitizePathName($s);
+		$this->assertEquals('C:\ccc/d\'d_d_', $result);
+
+		$s = 'C:\ccc/d\'d"d$';
+		$result = dol_sanitizePathName($s);
+		$this->assertEquals('C:\ccc/d\'d_d_', $result);
+
+		$s = '/aaa/bbb -a -b';
+		$result = dol_sanitizePathName($s);
+		$this->assertEquals('/aaa/bbb _a _b', $result);
+
+		$s = '/aaa/bbb -a -b';
+		$result = dol_sanitizePathName($s, '_', 0, 1);
+		$this->assertEquals('/aaa/bbb -a -b', $result);
 	}
 }

@@ -119,7 +119,7 @@ class ChargeSociales extends CommonObject
 	public $lib;
 
 	/**
-	 * @var int account ID
+	 * @var ?int account ID
 	 */
 	public $fk_account;
 
@@ -335,6 +335,22 @@ class ChargeSociales extends CommonObject
 	}
 
 
+	// phpcs:disable PEAR.NamingConventions.ValidFunctionName.ScopeNotCamelCaps
+	/**
+	 *  Return if a social contribution can be deleted: not once a payment exists, as for invoices
+	 *
+	 *  @return    int         Return integer <=0 if no, >0 if yes
+	 */
+	public function is_erasable()
+	{
+		// phpcs:enable
+		$totalpaid = $this->getSommePaiement();
+		if ($totalpaid < 0) {
+			return -1;
+		}
+		return (empty($totalpaid) ? 1 : 0);
+	}
+
 	/**
 	 *      Delete a social contribution
 	 *
@@ -344,6 +360,11 @@ class ChargeSociales extends CommonObject
 	public function delete($user)
 	{
 		$error = 0;
+
+		if ($this->is_erasable() <= 0) {
+			$this->error = 'ErrorRecordHasChildren';
+			return -1;
+		}
 
 		$this->db->begin();
 
@@ -418,7 +439,6 @@ class ChargeSociales extends CommonObject
 		if ($this->type > 0) {
 			$sql .= ", fk_type = ".((int) $this->type);
 		}
-		$sql .= ", fk_user_modif=".((int) $user->id);
 		$sql .= " WHERE rowid=".((int) $this->id);
 
 		dol_syslog(get_class($this)."::update", LOG_DEBUG);
@@ -672,8 +692,8 @@ class ChargeSociales extends CommonObject
 		if (isset($this->paye)) {
 			$label .= ' '.$this->getLibStatut(5);
 		}
-		if (!empty($this->ref)) {
-			$label .= '<br><b>'.$langs->trans('Ref').':</b> '.$this->ref;
+		if (!empty($this->id)) {
+			$label .= '<br><b>'.$langs->trans('Ref').':</b> '.$this->id;
 		}
 		if (!empty($this->label)) {
 			$label .= '<br><b>'.$langs->trans('Label').':</b> '.$this->label;
@@ -741,12 +761,9 @@ class ChargeSociales extends CommonObject
 	 */
 	public function getSommePaiement()
 	{
-		$table = 'paiementcharge';
-		$field = 'fk_charge';
-
 		$sql = 'SELECT sum(amount) as amount';
-		$sql .= ' FROM '.MAIN_DB_PREFIX.$table;
-		$sql .= " WHERE ".$field." = ".((int) $this->id);
+		$sql .= ' FROM '.MAIN_DB_PREFIX.'paiementcharge';
+		$sql .= " WHERE fk_charge = ".((int) $this->id);
 
 		dol_syslog(get_class($this)."::getSommePaiement", LOG_DEBUG);
 		$resql = $this->db->query($sql);
@@ -866,7 +883,7 @@ class ChargeSociales extends CommonObject
 			$return .= '<span class="info-box-label amount">'.price($this->amount, 0, $langs, 1, -1, -1, $conf->currency).'</span>';
 		}
 		if (method_exists($this, 'LibStatut')) {
-			$return .= '<br><div class="info-box-status">'.$this->getLibStatut(3, $this->alreadypaid).'</div>';
+			$return .= '<br><div class="info-box-status">'.$this->getLibStatut(3, (float) $this->alreadypaid).'</div>';
 		}
 		$return .= '</div>';
 		$return .= '</div>';

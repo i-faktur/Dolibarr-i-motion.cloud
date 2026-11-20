@@ -242,7 +242,7 @@ class pdf_vinci extends ModelePDFMo
 				$pdf->SetTitle($outputlangs->convToOutputCharset($object->ref));
 				$pdf->SetSubject($outputlangs->transnoentities("ManufacturingOrder"));
 				$pdf->SetCreator("Dolibarr ".DOL_VERSION);
-				$pdf->SetAuthor($outputlangs->convToOutputCharset($user->getFullName($outputlangs)));
+				$pdf->SetAuthor($outputlangs->convToOutputCharset($user->getAnonymisableFullName($outputlangs)));
 				$key_word=$outputlangs->convToOutputCharset($object->ref)." ".$outputlangs->transnoentities("ManufacturingOrder");
 				if (isset($object->thirdparty->name) && $object->thirdparty->name !== "") {
 					$key_word.=" ".$outputlangs->convToOutputCharset($object->thirdparty->name);
@@ -268,8 +268,8 @@ class pdf_vinci extends ModelePDFMo
 				$pdf->MultiCell(0, 3, ''); // Set interline to 3
 				$pdf->SetTextColor(0, 0, 0);
 
-				$tab_top = 90 + $top_shift;
-				$tab_top_newpage = (!getDolGlobalInt('MAIN_PDF_DONOTREPEAT_HEAD') ? 42 + $top_shift : 10);
+				$tab_top = 80 + $this->marge_haute + $top_shift;
+				$tab_top_newpage = (!getDolGlobalInt('MAIN_PDF_DONOTREPEAT_HEAD') ? 32 + $this->marge_haute + $top_shift : $this->marge_haute);
 
 				$tab_height = $this->page_hauteur - $tab_top - $heightforfooter - $heightforfreetext;
 
@@ -604,9 +604,12 @@ class pdf_vinci extends ModelePDFMo
 				$parameters = array('file' => $file, 'object' => $object, 'outputlangs' => $outputlangs);
 				global $action;
 				$reshook = $hookmanager->executeHooks('afterPDFCreation', $parameters, $this, $action); // Note that $action and $object may have been modified by some hooks
+				$this->warnings = $hookmanager->warnings;
 				if ($reshook < 0) {
 					$this->error = $hookmanager->error;
 					$this->errors = $hookmanager->errors;
+					dolChmod($file);
+					return -1;
 				}
 
 				dolChmod($file);
@@ -1067,7 +1070,7 @@ class pdf_vinci extends ModelePDFMo
 				$posy += 3;
 				$pdf->SetXY($posx, $posy);
 				$pdf->SetTextColor(0, 0, 60);
-				$pdf->MultiCell($w, 3, $outputlangs->transnoentities("Project")." : ".(empty($object->project->title) ? '' : $object->project->title), '', 'R');
+				$pdf->MultiCell($w, 3, $outputlangs->transnoentities("Project")." : ".(empty($object->project->title) ? '' : dol_trunc($object->project->title, 50)), '', 'R');
 			}
 		}
 
@@ -1097,7 +1100,7 @@ class pdf_vinci extends ModelePDFMo
 
 		// product info
 		$prodToMake = new Product($this->db);
-		$resProdToMake = $prodToMake->fetch($object->fk_product);
+		$resProdToMake = $prodToMake->fetch((int) $object->fk_product);
 
 		if ($resProdToMake > 0) {
 			// ref
@@ -1149,7 +1152,7 @@ class pdf_vinci extends ModelePDFMo
 			$posy += 4;
 			$pdf->SetXY($posx, $posy);
 			$pdf->SetTextColor(0, 0, 60);
-			$pdf->MultiCell(100, 3, $outputlangs->transnoentities("SupplierCode")." : ".$outputlangs->transnoentities($object->thirdparty->code_fournisseur), '', 'R');
+			$pdf->MultiCell(100, 3, $outputlangs->transnoentities("SupplierCode")." : ".$outputlangs->transnoentities((string) $object->thirdparty->code_fournisseur), '', 'R');
 		}
 
 		// Get contact
@@ -1196,7 +1199,7 @@ class pdf_vinci extends ModelePDFMo
 			$carac_emetteur .= pdf_build_address($outputlangs, $this->emetteur, $object->thirdparty, '', 0, 'source', $object);
 
 			// Show sender
-			$posy = 42 + $top_shift;
+			$posy = 32 + $this->marge_haute + $top_shift;
 			$posx = $this->marge_gauche;
 			if (getDolGlobalString('MAIN_INVERT_SENDER_RECIPIENT')) {
 				$posx = $this->page_largeur - $this->marge_droite - 80;
@@ -1250,7 +1253,7 @@ class pdf_vinci extends ModelePDFMo
 			//if ($this->page_largeur < 210) {
 			//	$widthrecbox = 84; // To work with US executive format
 			//}
-			//$posy = 42 + $top_shift;
+			//$posy = 32 + $this->marge_haute + $top_shift;
 			//$posx = $this->page_largeur - $this->marge_droite - $widthrecbox;
 			//if (getDolGlobalString('MAIN_INVERT_SENDER_RECIPIENT')) {
 			//	$posx = $this->marge_gauche;
@@ -1299,11 +1302,11 @@ class pdf_vinci extends ModelePDFMo
 	/**
 	 *   	Define Array Column Field
 	 *
-	 *   	@param	Mo				$object    		common object
+	 *   	@param	CommonObject	$object    		common object
 	 *   	@param	Translate		$outputlangs    langs
-	 *      @param	int				$hidedetails		Do not show line details
-	 *      @param	int				$hidedesc		Do not show desc
-	 *      @param	int				$hideref			Do not show ref
+	 *      @param	int<0,1>		$hidedetails	Do not show line details
+	 *      @param	int<0,1>		$hidedesc		Do not show desc
+	 *      @param	int<0,1>		$hideref		Do not show ref
 	 *      @return	void
 	 */
 	public function defineColumnField($object, $outputlangs, $hidedetails = 0, $hidedesc = 0, $hideref = 0)
@@ -1343,16 +1346,16 @@ class pdf_vinci extends ModelePDFMo
 		$this->cols['code'] = array(
 			'rank' => $rank,
 			'status' => true,
-			'width' => 35, // in mm
+			'width' => 35.0, // in mm
 			'title' => array(
 				'textkey' => 'Ref',
 				'align' => 'L',
-				'padding' => array(0.5, 1, 0.5, 1.5), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
+				'padding' => array(0.5, 1.0, 0.5, 1.5), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
 			),
 			'border-left' => true, // add left line separator
 			'content' => array(
 				'align' => 'L',
-				'padding' => array(1, 0.5, 1, 1.5), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
+				'padding' => array(1.0, 0.5, 1.0, 1.5), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
 			),
 		);
 
@@ -1362,16 +1365,16 @@ class pdf_vinci extends ModelePDFMo
 			'width' => false, // only for desc
 			'status' => true,
 			'title' => array(
-				'textkey' => 'Designation', // use lang key is useful in somme case with module
+				'textkey' => 'Designation', // use lang key is useful in some case with module
 				'align' => 'L',
 				// 'textkey' => 'yourLangKey', // if there is no label, yourLangKey will be translated to replace label
 				// 'label' => ' ', // the final label
-				'padding' => array(0.5, 1, 0.5, 1.5), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
+				'padding' => array(0.5, 1.0, 0.5, 1.5), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
 			),
 			'border-left' => true,
 			'content' => array(
 				'align' => 'L',
-				'padding' => array(1, 0.5, 1, 1.5), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
+				'padding' => array(1.0, 0.5, 1.0, 1.5), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
 			),
 		);
 
@@ -1379,7 +1382,7 @@ class pdf_vinci extends ModelePDFMo
 		$this->cols['dim'] = array(
 			'rank' => $rank,
 			'status' => true,
-			'width' => 25, // in mm
+			'width' => 25.0, // in mm
 			'title' => array(
 				'textkey' => 'Dimensions'
 			),
@@ -1389,7 +1392,7 @@ class pdf_vinci extends ModelePDFMo
 		$rank += 10;
 		$this->cols['qty'] = array(
 			'rank' => $rank,
-			'width' => 16, // in mm
+			'width' => 16.0, // in mm
 			'status' => true,
 			'title' => array(
 				'textkey' => 'Qty'
@@ -1400,7 +1403,7 @@ class pdf_vinci extends ModelePDFMo
 		$rank += 10;
 		$this->cols['qtytot'] = array(
 			'rank' => $rank,
-			'width' => 25, // in mm
+			'width' => 25.0, // in mm
 			'status' => true,
 			'title' => array(
 				'textkey' => 'QtyTot'

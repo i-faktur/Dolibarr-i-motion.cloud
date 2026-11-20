@@ -1,0 +1,204 @@
+<?php
+/* Copyright (C) 2026	Open-Dsi	<support@open-dsi.fr>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/**
+ * \file       htdocs/core/lib/phone.lib.php
+ * \ingroup    core
+ * \brief      Helper functions for phone number formatting
+ */
+
+/**
+ * Parse a stored phone number into country code and number parts
+ *
+ * Stored format is "+{code} {number}" (e.g. "+33 644986885").
+ * A code glued to the number or followed by formatting (e.g. "+33644986885" or
+ * "+33(0)6 44 98 68 85", from imports or old data) is recognized when $db is provided,
+ * using the longest phone code known in llx_c_country.
+ * If no code is found, returns empty code and the full string as number.
+ *
+ * @param	string		$phone		Stored phone number
+ * @param	?DoliDB		$db			Database handler, used to recognize a code glued to the number
+ * @return	array{code:string,number:string}	Array with 'code' and 'number' keys
+ */
+function dol_parse_phone($phone, $db = null)
+{
+	$phone = trim((string) $phone);
+	if ($phone === '') {
+		return array('code' => '', 'number' => '');
+	}
+
+	if (strpos($phone, '+') === 0) {
+		$pos = strpos($phone, ' ');
+		if ($pos !== false && preg_match('/^\+[0-9]+$/', substr($phone, 0, $pos))) {
+			return array(
+				'code' => substr($phone, 0, $pos),
+				'number' => substr($phone, $pos + 1)
+			);
+		}
+		// Code glued to the number or followed by formatting (e.g. "+33612345678", "+33(0)9 72 36 76 46"):
+		// look for the longest known phone code
+		if ($db !== null) {
+			$digits = preg_replace('/[^0-9]/', '', str_replace('(0)', '', substr($phone, 1)));
+			$phonecodes = dol_get_all_phone_codes($db);
+			for ($len = 4; $len >= 1; $len--) {
+				$candidate = substr($digits, 0, $len);
+				if (strlen($digits) > $len && in_array($candidate, $phonecodes, true)) {
+					return array('code' => '+'.$candidate, 'number' => substr($digits, $len));
+				}
+			}
+		}
+		return array('code' => '', 'number' => $phone);
+	}
+
+	return array('code' => '', 'number' => $phone);
+}
+
+/**
+ * Get the list of all distinct phone codes known in llx_c_country
+ *
+ * @param	DoliDB	$db		Database handler
+ * @return	string[]		List of distinct phone codes, without "+" (e.g. array('33','32','1684'))
+ */
+function dol_get_all_phone_codes($db)
+{
+	static $cache = null;
+	if ($cache !== null) {
+		return $cache;
+	}
+
+	$cache = array();
+	$sql = "SELECT DISTINCT phone_code FROM ".$db->prefix()."c_country";
+	$sql .= " WHERE phone_code IS NOT NULL AND phone_code != 0";
+	$resql = $db->query($sql);
+	if ($resql) {
+		while ($obj = $db->fetch_object($resql)) {
+			$cache[] = (string) $obj->phone_code;
+		}
+		$db->free($resql);
+	} else {
+		dol_syslog("dol_get_all_phone_codes: ".$db->lasterror(), LOG_ERR);
+	}
+
+	return $cache;
+}
+
+/**
+ * Build a normalized phone string from code and number parts
+ *
+ * Strips formatting characters (spaces, dashes, dots, parentheses) from number.
+ * Also strips the national trunk prefix for the country matching $code
+ * (e.g. leading "0" for France, "8" for Russia, "06" for Hungary).
+ * Returns "+{code} {number}" or just the number if code is empty.
+ *
+ * @param	DoliDB	$db			Database handler
+ * @param	string	$code		Country calling code (e.g. "+33")
+ * @param	string	$number		Phone number (may contain formatting)
+ * @return	string				Normalized phone string
+ */
+function dol_build_phone($db, $code, $number)
+{
+	$number = preg_replace('/[\s\-\.\(\)]/', '', trim((string) $number));
+	$code = trim((string) $code);
+
+	if ($number === '') {
+		return '';
+	}
+
+	if ($code !== '') {
+		// Strip national trunk prefix (e.g. leading "0" for France)
+		$sql = "SELECT trunk_prefix FROM ".$db->prefix()."c_country";
+		$sql .= " WHERE phone_code = ".((int) ltrim($code, '+'));
+		$sql .= " AND trunk_prefix IS NOT NULL AND trunk_prefix != ''";
+		$sql .= " LIMIT 1";
+		$resql = $db->query($sql);
+		if ($resql) {
+			$obj = $db->fetch_object($resql);
+			if ($obj && isset($obj->trunk_prefix) && $obj->trunk_prefix !== '' && $obj->trunk_prefix !== null) {
+				$prefix = $obj->trunk_prefix;
+				if (strpos($number, $prefix) === 0) {
+					$number = substr($number, strlen($prefix));
+				}
+			}
+			$db->free($resql);
+		}
+	}
+
+	if ($code !== '') {
+		return $code.' '.$number;
+	}
+
+	return $number;
+}
+
+/**
+ * Get the national trunk prefix for a phone code
+ *
+ * @param	DoliDB	$db			Database handler
+ * @param	string	$phone_code	Phone code (e.g. "+33")
+ * @return	string				Trunk prefix (e.g. "0") or empty string
+ */
+function dol_get_trunk_prefix($db, $phone_code)
+{
+	$phone_code = trim((string) $phone_code);
+	if ($phone_code === '') {
+		return '';
+	}
+
+	$sql = "SELECT trunk_prefix FROM ".$db->prefix()."c_country";
+	$sql .= " WHERE phone_code = ".((int) ltrim($phone_code, '+'));
+	$sql .= " AND trunk_prefix IS NOT NULL AND trunk_prefix != ''";
+	$sql .= " LIMIT 1";
+	$resql = $db->query($sql);
+	if ($resql) {
+		$obj = $db->fetch_object($resql);
+		if ($obj && isset($obj->trunk_prefix) && $obj->trunk_prefix !== '' && $obj->trunk_prefix !== null) {
+			$db->free($resql);
+			return $obj->trunk_prefix;
+		}
+		$db->free($resql);
+	}
+
+	return '';
+}
+
+/**
+ * Get the phone calling code for a country
+ *
+ * @param	DoliDB	$db				Database handler
+ * @param	int		$country_id		Country rowid
+ * @return	string					Phone code (e.g. "+33") or empty string
+ */
+function dol_get_phone_code_from_country($db, $country_id)
+{
+	$country_id = (int) $country_id;
+	if ($country_id <= 0) {
+		return '';
+	}
+
+	$sql = "SELECT phone_code FROM ".$db->prefix()."c_country WHERE rowid = ".((int) $country_id);
+	$resql = $db->query($sql);
+	if ($resql) {
+		$obj = $db->fetch_object($resql);
+		if ($obj && !empty($obj->phone_code)) {
+			$db->free($resql);
+			return '+'.$obj->phone_code;
+		}
+		$db->free($resql);
+	}
+
+	return '';
+}

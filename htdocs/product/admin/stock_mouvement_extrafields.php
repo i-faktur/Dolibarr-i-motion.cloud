@@ -41,7 +41,7 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/stock.lib.php';
  */
 
 // Load translation files required by the page
-$langs->loadLangs(array('stock@stock', 'admin'));
+$langs->loadLangs(array('companies', 'admin', 'stocks'));
 
 $extrafields = new ExtraFields($db);
 $form = new Form($db);
@@ -75,13 +75,13 @@ $textobject = $langs->transnoentitiesnoconv("StockMovement");
 llxHeader('', $langs->trans("StockSetup"), '', '', 0, 0, '', '', '', 'mod-product page-admin_stock_mouvement_extrafields');
 
 
-$linkback = '<a href="'.DOL_URL_ROOT.'/admin/modules.php?restore_lastsearch_values=1">'.$langs->trans("BackToModuleList").'</a>';
+$linkback = '<a href="'.dolBuildUrl(DOL_URL_ROOT.'/admin/modules.php', ['restore_lastsearch_values' => 1]).'">'.img_picto($langs->trans("BackToModuleList"), 'back', 'class="pictofixedwidth"').'<span class="hideonsmartphone">'.$langs->trans("BackToModuleList").'</span></a>';
 print load_fiche_titre($langs->trans("StockSetup"), $linkback, 'title_setup');
 
 
 $head = stock_admin_prepare_head();
 
-print dol_get_fiche_head($head, 'stockMouvementAttributes', $langs->trans("StockMouvementExtraFields"), -1, 'account');
+print dol_get_fiche_head($head, 'stockMouvementAttributes', $langs->trans("StockMouvementExtraFields"), -1, 'stock');
 
 require DOL_DOCUMENT_ROOT.'/core/tpl/admin_extrafields_view.tpl.php';
 

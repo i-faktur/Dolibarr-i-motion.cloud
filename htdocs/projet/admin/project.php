@@ -6,7 +6,7 @@
  * Copyright (C) 2013		Florian Henry		<florian.henry@open-concept.pro>
  * Copyright (C) 2015       Marcos García       <marcosgdf@gmail.com>
  * Copyright (C) 2018		Ferran Marcet		<fmarcet@2byte.es>
- * Copyright (C) 2024-2025	MDW							<mdeweerd@users.noreply.github.com>
+ * Copyright (C) 2024-2026	MDW					<mdeweerd@users.noreply.github.com>
  * Copyright (C) 2024       Frédéric France             <frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -71,6 +71,7 @@ if ($action == 'updateMask') {
 	$maskconstproject = GETPOST('maskconstproject', 'aZ09');
 	$maskproject = GETPOST('maskproject', 'alpha');
 
+	$res = -1;
 	if ($maskconstproject && preg_match('/_MASK$/', $maskconstproject)) {
 		$res = dolibarr_set_const($db, $maskconstproject, $maskproject, 'chaine', 0, '', $conf->entity);
 	}
@@ -266,7 +267,7 @@ llxHeader("", $langs->trans("ProjectsSetup"), '', '', 0, 0, '', '', '', 'mod-pro
 
 $form = new Form($db);
 
-$linkback = '<a href="'.DOL_URL_ROOT.'/admin/modules.php?restore_lastsearch_values=1">'.$langs->trans("BackToModuleList").'</a>';
+$linkback = '<a href="'.dolBuildUrl(DOL_URL_ROOT.'/admin/modules.php', ['restore_lastsearch_values' => 1]).'">'.img_picto($langs->trans("BackToModuleList"), 'back', 'class="pictofixedwidth"').'<span class="hideonsmartphone">'.$langs->trans("BackToModuleList").'</span></a>';
 print load_fiche_titre($langs->trans("ProjectsSetup"), $linkback, 'title_setup');
 
 $head = project_admin_prepare_head();
@@ -522,11 +523,11 @@ print load_fiche_titre($langs->trans("ProjectsModelModule"), '', '');
 // Defini tableau def de modele
 $type = 'project';
 $def = array();
-
+// TODO Replace with $def = getListOfModels($db, $type);
 $sql = "SELECT nom";
 $sql .= " FROM ".MAIN_DB_PREFIX."document_model";
 $sql .= " WHERE type = '".$db->escape($type)."'";
-$sql .= " AND entity = ".$conf->entity;
+$sql .= " AND entity = ".((int) $conf->entity);
 
 $resql = $db->query($sql);
 if ($resql) {
@@ -556,7 +557,6 @@ print "</tr>\n";
 
 clearstatcache();
 
-$filelist = array();
 foreach ($dirmodels as $reldir) {
 	foreach (array('', '/doc') as $valdir) {
 		$dir = dol_buildpath($reldir."core/modules/project/".$valdir);
@@ -564,6 +564,7 @@ foreach ($dirmodels as $reldir) {
 		if (is_dir($dir)) {
 			$handle = opendir($dir);
 			if (is_resource($handle)) {
+				$filelist = array();
 				while (($file = readdir($handle)) !== false) {
 					$filelist[] = $file;
 				}
@@ -676,7 +677,7 @@ if (!getDolGlobalString('PROJECT_HIDE_TASKS')) {
 	$sql = "SELECT nom";
 	$sql .= " FROM ".MAIN_DB_PREFIX."document_model";
 	$sql .= " WHERE type = '".$db->escape($type)."'";
-	$sql .= " AND entity = ".$conf->entity;
+	$sql .= " AND entity = ".((int) $conf->entity);
 
 	$resql = $db->query($sql);
 	if ($resql) {
@@ -713,6 +714,7 @@ if (!getDolGlobalString('PROJECT_HIDE_TASKS')) {
 			if (is_dir($dir)) {
 				$handle = opendir($dir);
 				if (is_resource($handle)) {
+					$filelist = array();
 					while (($file = readdir($handle)) !== false) {
 						$filelist[] = $file;
 					}
@@ -786,7 +788,7 @@ if (!getDolGlobalString('PROJECT_HIDE_TASKS')) {
 									// Preview
 									print '<td class="center">';
 									if ($module->type == 'pdf') {
-										print '<a href="'.$_SERVER["PHP_SELF"].'?action=specimentask&module='.$name.'">'.img_object($langs->trans("Preview"), 'bill').'</a>';
+										print '<a href="'.$_SERVER["PHP_SELF"].'?action=specimentask&token='.newToken().'&module='.$name.'">'.img_object($langs->trans("Preview"), 'bill').'</a>';
 									} else {
 										print img_object($langs->transnoentitiesnoconv("PreviewNotAvailable"), 'generic');
 									}
@@ -870,6 +872,7 @@ print '<input type="submit" class="button small reposition" name="PROJECT_TIMESH
 print '</td>';
 print '</tr>';
 
+/* Generates a lot of confusion for users. Not visible by default.
 print '<tr class="oddeven">';
 print '<td class="left">';
 print $form->textwithpicto($langs->transnoentities('PROJECT_DISPLAY_LINKED_BY_CONTACT'), $langs->transnoentities('PROJECT_DISPLAY_LINKED_BY_CONTACT_help'));
@@ -878,6 +881,7 @@ print '<td class="right">';
 print ajax_constantonoff('PROJECT_DISPLAY_LINKED_BY_CONTACT');
 print '</td>';
 print '</tr>';
+*/
 
 print '</table>';
 print '</div>';

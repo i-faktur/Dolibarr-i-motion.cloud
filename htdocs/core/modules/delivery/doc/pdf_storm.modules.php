@@ -128,7 +128,7 @@ class pdf_storm extends ModelePDFDeliveryOrder
 	 *  @param      int<0,1>	$hidedetails		Do not show line details
 	 *  @param      int<0,1>	$hidedesc			Do not show desc
 	 *  @param      int<0,1>	$hideref			Do not show ref
-	 *  @return     int<0,1>             			1=OK, 0=KO
+	 *  @return     int<-1,1>             			1=OK, <=0 => KO
 	 */
 	public function write_file($object, $outputlangs, $srctemplatepath = '', $hidedetails = 0, $hidedesc = 0, $hideref = 0)
 	{
@@ -144,7 +144,7 @@ class pdf_storm extends ModelePDFDeliveryOrder
 		}
 
 		// Load translation files required by the page
-		$outputlangs->loadLangs(array("main", "dict", "companies", "bills", "products", "sendings", "deliveries"));
+		$outputlangs->loadLangs(array("main", "dict", "companies", "bills", "products", "sendings"));
 
 		if ($conf->expedition->dir_output) {
 			$object->fetch_thirdparty();
@@ -274,7 +274,7 @@ class pdf_storm extends ModelePDFDeliveryOrder
 				$pdf->SetTitle($outputlangs->convToOutputCharset($object->ref));
 				$pdf->SetSubject($outputlangs->transnoentities("DeliveryOrder"));
 				$pdf->SetCreator("Dolibarr ".DOL_VERSION);
-				$pdf->SetAuthor($outputlangs->convToOutputCharset($user->getFullName($outputlangs)));
+				$pdf->SetAuthor($outputlangs->convToOutputCharset($user->getAnonymisableFullName($outputlangs)));
 				$pdf->SetKeyWords($outputlangs->convToOutputCharset($object->ref)." ".$outputlangs->transnoentities("DeliveryOrder"));
 				if (getDolGlobalString('MAIN_DISABLE_PDF_COMPRESSION')) {
 					$pdf->SetCompression(false);
@@ -581,9 +581,12 @@ class pdf_storm extends ModelePDFDeliveryOrder
 				$parameters = array('file' => $file, 'object' => $object, 'outputlangs' => $outputlangs);
 				global $action;
 				$reshook = $hookmanager->executeHooks('afterPDFCreation', $parameters, $this, $action); // Note that $action and $object may have been modified by some hooks
+				$this->warnings = $hookmanager->warnings;
 				if ($reshook < 0) {
 					$this->error = $hookmanager->error;
 					$this->errors = $hookmanager->errors;
+					dolChmod($file);
+					return -1;
 				}
 
 				dolChmod($file);
@@ -624,11 +627,11 @@ class pdf_storm extends ModelePDFDeliveryOrder
 		$larg_sign = ($this->page_largeur - $this->marge_gauche - $this->marge_droite) / 3;
 		$pdf->RoundedRect($this->marge_gauche, $posy + 1, $larg_sign, 25, $this->corner_radius, '1234', 'D');
 		$pdf->SetXY($this->marge_gauche + 2, $posy + 2);
-		$pdf->MultiCell($larg_sign, 2, $outputlangs->trans("For").' '.$outputlangs->convToOutputCharset($mysoc->name).":", '', 'L');
+		$pdf->MultiCell($larg_sign, 2, $outputlangs->transnoentities("For").' '.$outputlangs->convToOutputCharset($mysoc->name).":", '', 'L');
 
 		$pdf->RoundedRect(2 * $larg_sign + $this->marge_gauche, $posy + 1, $larg_sign, 25, $this->corner_radius, '1234', 'D');
 		$pdf->SetXY(2 * $larg_sign + $this->marge_gauche + 2, $posy + 2);
-		$pdf->MultiCell($larg_sign, 2, $outputlangs->trans("ForCustomer").':', '', 'L');
+		$pdf->MultiCell($larg_sign, 2, $outputlangs->transnoentities("ForCustomer").':', '', 'L');
 	}
 
 
@@ -751,7 +754,7 @@ class pdf_storm extends ModelePDFDeliveryOrder
 			$posy += 5;
 			$pdf->SetXY($posx, $posy);
 			$pdf->SetTextColor(0, 0, 60);
-			$pdf->MultiCell(100, 3, $outputlangs->transnoentities("CustomerCode")." : ".$outputlangs->transnoentities($object->thirdparty->code_client), '', 'R');
+			$pdf->MultiCell(100, 3, $outputlangs->transnoentities("CustomerCode")." : ".$outputlangs->transnoentities((string) $object->thirdparty->code_client), '', 'R');
 		}
 
 		$pdf->SetTextColor(0, 0, 60);
@@ -881,11 +884,11 @@ class pdf_storm extends ModelePDFDeliveryOrder
 	/**
 	 *   	Define Array Column Field
 	 *
-	 *   	@param	Delivery	   $object    	    common object
-	 *   	@param	Translate	   $outputlangs     langs
-	 *      @param	int			   $hidedetails		Do not show line details
-	 *      @param	int			   $hidedesc		Do not show desc
-	 *      @param	int			   $hideref			Do not show ref
+	 *   	@param	CommonObject	$object    	    common object
+	 *   	@param	Translate		$outputlangs    langs
+	 *      @param	int<0,1>		$hidedetails	Do not show line details
+	 *      @param	int<0,1>		$hidedesc		Do not show desc
+	 *      @param	int<0,1>		$hideref		Do not show ref
 	 *      @return	void
 	 */
 	public function defineColumnField($object, $outputlangs, $hidedetails = 0, $hidedesc = 0, $hideref = 0)
@@ -928,7 +931,7 @@ class pdf_storm extends ModelePDFDeliveryOrder
 			'width' => false, // only for desc
 			'status' => true,
 			'title' => array(
-				'textkey' => 'Designation', // use lang key is useful in somme case with module
+				'textkey' => 'Designation', // use lang key is useful in some case with module
 				'align' => 'L',
 				// 'textkey' => 'yourLangKey', // if there is no label, yourLangKey will be translated to replace label
 				// 'label' => ' ', // the final label
@@ -942,14 +945,14 @@ class pdf_storm extends ModelePDFDeliveryOrder
 		$rank += 10;
 		$this->cols['photo'] = array(
 			'rank' => $rank,
-			'width' => getDolGlobalInt('MAIN_DOCUMENTS_WITH_PICTURE_WIDTH', 20), // in mm
+			'width' => (float) getDolGlobalInt('MAIN_DOCUMENTS_WITH_PICTURE_WIDTH', 20), // in mm
 			'status' => false,
 			'title' => array(
 				'textkey' => 'Photo',
 				'label' => ' '
 			),
 			'content' => array(
-				'padding' => array(0, 0, 0, 0), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
+				'padding' => array(0.0, 0.0, 0.0, 0.0), // Like css 0 => top , 1 => right, 2 => bottom, 3 => left
 			),
 			'border-left' => false, // remove left line separator
 		);
@@ -962,7 +965,7 @@ class pdf_storm extends ModelePDFDeliveryOrder
 		$rank += 10;
 		$this->cols['Comments'] = array(
 			'rank' => $rank,
-			'width' => 50, // in mm
+			'width' => 50.0, // in mm
 			'status' => true,
 			'title' => array(
 				'textkey' => 'Comments'
@@ -984,7 +987,7 @@ class pdf_storm extends ModelePDFDeliveryOrder
 		$rank += 10;
 		$this->cols['qty_shipped'] = array(
 			'rank' => $rank,
-			'width' => 20, // in mm
+			'width' => 20.0, // in mm
 			'status' => !getDolGlobalString('DELIVERY_PDF_HIDE_SHIPPED'),
 			'title' => array(
 				'textkey' => 'QtyShippedShort'
@@ -995,7 +998,7 @@ class pdf_storm extends ModelePDFDeliveryOrder
 		$rank += 10;
 		$this->cols['qty_remaining'] = array(
 			'rank' => $rank,
-			'width' => 20, // in mm
+			'width' => 20.0, // in mm
 			'status' => !getDolGlobalString('DELIVERY_PDF_HIDE_QTYTOSHIP'),
 			'title' => array(
 				'textkey' => 'KeepToShipShort'

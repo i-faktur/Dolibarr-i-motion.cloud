@@ -50,6 +50,30 @@ $conf->global->MAIN_DISABLE_ALL_MAILS = 1;
 class UtilsTest extends CommonClassTest
 {
 	/**
+	 * testShellPasswordParam
+	 *
+	 * The password of the database must reach the command as it is, whatever the chars it contains
+	 *
+	 * @return  void
+	 */
+	public function testShellPasswordParam()
+	{
+		if ($this->fakeAssertIfNotUnix(__METHOD__." only works on *nix")) {
+			return;
+		}
+
+		global $db;
+		$db = $this->savdb;
+
+		$utils = new Utils($db);
+		foreach (array('plain', 'abc\\', 'x\\"y', 'a\\$HOME', 'p"w', "it's", '$(id)', 'a`id`b', 'a b;c|d&e', '%PATH%') as $password) {
+			$out = array();
+			exec('printf %s '.$utils->getShellPasswordParam($password).' 2>&1', $out);
+			$this->assertEquals('-p'.$password, implode("\n", $out), 'Password '.$password.' was altered by the shell');
+		}
+	}
+
+	/**
 	 * testExecuteCLI
 	 *
 	 * @return  void
@@ -69,6 +93,7 @@ class UtilsTest extends CommonClassTest
 
 		$localobject = new Utils($db);
 		$result = $localobject->executeCLI('ls', $conf->admin->dir_temp.'/out.tmp', 1);
+		print __METHOD__." ls with param 1 result=".$result['result']."\n";
 		print var_export($result, true);
 		$this->assertEquals($result['result'], 0);
 		$this->assertEquals($result['error'], '');
@@ -76,12 +101,12 @@ class UtilsTest extends CommonClassTest
 
 		$localobject = new Utils($db);
 		$result = $localobject->executeCLI('ls', $conf->admin->dir_temp.'/out.tmp', 2);
+		print __METHOD__." ls with param 2 result=".$result['result']."\n";
 		print var_export($result, true);
 		$this->assertEquals($result['result'], 0);
 		$this->assertEquals($result['error'], '');
 		//$this->assertEquals(preg_match('/phpunit/', $result['output']), 1);
 
-		print __METHOD__." result=".$result['result']."\n";
 		return $result;
 	}
 }

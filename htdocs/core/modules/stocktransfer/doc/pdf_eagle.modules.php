@@ -4,7 +4,7 @@
  * Copyright (C) 2005-2012 Laurent Destailleur	<eldy@users.sourceforge.net>
  * Copyright (C) 2005-2012 Regis Houssin		<regis.houssin@inodbox.com>
  * Copyright (C) 2014-2015 Marcos García        <marcosgdf@gmail.com>
- * Copyright (C) 2018-2025  Frédéric France      <frederic.france@free.fr>
+ * Copyright (C) 2018-2026  Frédéric France      <frederic.france@free.fr>
  * Copyright (C) 2021 	   Gauthier VERDOL 	    <gauthier.verdol@atm-consulting.fr>
  * Copyright (C) 2024-2025	MDW					<mdeweerd@users.noreply.github.com>
  * Copyright (C) 2024	   Nick Fragoulis
@@ -201,14 +201,14 @@ class pdf_eagle extends ModelePDFStockTransfer
 		}
 
 		// Load translation files required by page
-		$outputlangs->loadLangs(array("main", "bills", "products", "dict", "companies", "propal", "deliveries", "sendings", "productbatch", "stocks", "stocktransfer@stocktransfer"));
+		$outputlangs->loadLangs(array("main", "bills", "products", "dict", "companies", "propal", "sendings", "productbatch", "stocks", "other"));
 
 		global $outputlangsbis;
 		$outputlangsbis = null;
 		if (getDolGlobalString('PDF_USE_ALSO_LANGUAGE_CODE') && $outputlangs->defaultlang != getDolGlobalString('PDF_USE_ALSO_LANGUAGE_CODE')) {
 			$outputlangsbis = new Translate('', $conf);
 			$outputlangsbis->setDefaultLang(getDolGlobalString('PDF_USE_ALSO_LANGUAGE_CODE'));
-			$outputlangsbis->loadLangs(array("main", "bills", "orders", "products", "dict", "companies", "propal", "deliveries", "sendings", "productbatch"));
+			$outputlangsbis->loadLangs(array("main", "bills", "orders", "products", "dict", "companies", "propal", "sendings", "productbatch"));
 		}
 
 		$nblines = is_array($object->lines) ? count($object->lines) : 0;
@@ -335,7 +335,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 				$pdf->SetTitle($outputlangs->convToOutputCharset($object->ref));
 				$pdf->SetSubject($outputlangs->transnoentities("StockTransfer"));
 				$pdf->SetCreator("Dolibarr ".DOL_VERSION);
-				$pdf->SetAuthor($outputlangs->convToOutputCharset($user->getFullName($outputlangs)));
+				$pdf->SetAuthor($outputlangs->convToOutputCharset($user->getAnonymisableFullName($outputlangs)));
 				$pdf->SetKeyWords($outputlangs->convToOutputCharset($object->ref)." ".$outputlangs->transnoentities("StockTransfer"));
 				if (getDolGlobalString('MAIN_DISABLE_PDF_COMPRESSION')) {
 					$pdf->SetCompression(false);
@@ -424,7 +424,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 					// Notes
 					if (!empty($object->note_public)) {
 						$pdf->SetFont('', '', $default_font_size - 1); // Dans boucle pour gerer multi-page
-						$pdf->writeHTMLCell(190, 3, $this->posxdesc - 1, $tab_top_alt, dol_htmlentitiesbr($object->note_public), 0, 1);
+						$pdf->writeHTMLCell(190, 3, $this->posxdesc - 1, $tab_top_alt, dol_htmlentitiesbr((string) $object->note_public), 0, 1);
 					}
 
 					$nexY = $pdf->GetY();
@@ -451,10 +451,10 @@ class pdf_eagle extends ModelePDFStockTransfer
 					$barcode_path = '';
 					$result = 0;
 					if ($module->encodingIsSupported($encoding)) {
-						$result = $module->writeBarCode($object->ref, $encoding);
+						$result = $module->writeBarCode((string) $object->ref, $encoding);
 
 						// get path of qrcode image
-						$newcode = $object->ref;
+						$newcode = (string) $object->ref;
 						if (!preg_match('/^\w+$/', $newcode) || dol_strlen($newcode) > 32) {
 							$newcode = dol_hash($newcode, 'md5');
 						}
@@ -534,18 +534,19 @@ class pdf_eagle extends ModelePDFStockTransfer
 					$curX = $this->posxdesc - 1;
 
 					$pdf->startTransaction();
-					if (method_exists($object->lines[$i], 'fetch_product')) {
+
+					if (is_object($object->lines[$i]) && method_exists($object->lines[$i], 'fetch_product')) {
 						$object->lines[$i]->fetch_product();
 						$object->lines[$i]->label = $object->lines[$i]->product->label;
 						$object->lines[$i]->description = $object->lines[$i]->product->description;
 						$object->lines[$i]->weight = $object->lines[$i]->product->weight;
-						$object->lines[$i]->weight_units = $object->lines[$i]->product->weight_units;
+						$object->lines[$i]->weight_units = (int) $object->lines[$i]->product->weight_units;
 						$object->lines[$i]->length = $object->lines[$i]->product->length;
-						$object->lines[$i]->length_units = $object->lines[$i]->product->length_units;
+						$object->lines[$i]->length_units = (int) $object->lines[$i]->product->length_units;
 						$object->lines[$i]->surface = $object->lines[$i]->product->surface;
-						$object->lines[$i]->surface_units = $object->lines[$i]->product->surface_units;
+						$object->lines[$i]->surface_units = (int) $object->lines[$i]->product->surface_units;
 						$object->lines[$i]->volume = $object->lines[$i]->product->volume;
-						$object->lines[$i]->volume_units = $object->lines[$i]->product->volume_units;
+						$object->lines[$i]->volume_units = (int) $object->lines[$i]->product->volume_units;
 						$object->lines[$i]->fk_unit = $object->lines[$i]->product->fk_unit;
 						//var_dump($object->lines[$i]);exit;
 					}
@@ -610,10 +611,14 @@ class pdf_eagle extends ModelePDFStockTransfer
 
 					$pdf->SetFont('', '', $default_font_size - 1); // We reposition the default font
 
-					// Lot / série
+					// Bottom of the highest cell of the line (batch and warehouses may be written on several lines)
+					$posYAfterCells = $nexY;
+
+					// Batch / serial number
 					if (isModEnabled('productbatch')) {
 						$pdf->SetXY($this->posxlot, $curY);
 						$pdf->MultiCell(($this->posxweightvol - $this->posxlot), 3, $object->lines[$i]->batch, '', 'C');
+						$posYAfterCells = max($posYAfterCells, $pdf->GetY());
 					}
 
 					// weight
@@ -649,6 +654,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 					}
 					$pdf->SetXY($this->posxwarehousesource, $curY);
 					$pdf->MultiCell(($this->posxwarehousedestination - $this->posxwarehousesource), 3, $wh_source->ref.(!empty($wh_source->lieu) ? ' - '.$wh_source->lieu : ''), '', 'C');
+					$posYAfterCells = max($posYAfterCells, $pdf->GetY());
 
 					// Warehouse destination
 					$wh_destination = new Entrepot($this->db);
@@ -660,6 +666,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 					}
 					$pdf->SetXY($this->posxwarehousedestination, $curY);
 					$pdf->MultiCell(($this->posxpuht - $this->posxwarehousedestination), 3, $wh_destination->ref.(!empty($wh_destination->lieu) ? ' - '.$wh_destination->lieu : ''), '', 'C');
+					$posYAfterCells = max($posYAfterCells, $pdf->GetY());
 
 					if (getDolGlobalString('STOCKTRANSFER_PDF_DISPLAY_AMOUNT_HT')) {
 						$pdf->SetXY($this->posxpuht, $curY);
@@ -669,6 +676,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 						$pdf->MultiCell(($this->page_largeur - $this->marge_droite - $this->posxtotalht), 3, price($object->lines[$i]->total_ht, 0, $outputlangs), '', 'R');
 					}
 
+					$nexY = max($nexY, $posYAfterCells);
 					$nexY += 3;
 					if ($weighttxt && $voltxt) {
 						$nexY += 2;
@@ -748,9 +756,12 @@ class pdf_eagle extends ModelePDFStockTransfer
 				$parameters = array('file' => $file, 'object' => $object, 'outputlangs' => $outputlangs);
 				global $action;
 				$reshook = $hookmanager->executeHooks('afterPDFCreation', $parameters, $this, $action); // Note that $action and $object may have been modified by some hooks
+				$this->warnings = $hookmanager->warnings;
 				if ($reshook < 0) {
 					$this->error = $hookmanager->error;
 					$this->errors = $hookmanager->errors;
+					dolChmod($file);
+					return -1;
 				}
 
 				dolChmod($file);
@@ -828,10 +839,10 @@ class pdf_eagle extends ModelePDFStockTransfer
 			$object->volume_units = $object->size_units * 3;
 		}
 
-		if ($totalWeight != '') {
+		if (!empty($totalWeight)) {
 			$totalWeighttoshow = showDimensionInBestUnit($totalWeight, 0, "weight", $outputlangs);
 		}
-		if ($totalVolume != '') {
+		if (!empty($totalVolume)) {
 			$totalVolumetoshow = showDimensionInBestUnit($totalVolume, 0, "volume", $outputlangs);
 		}
 		if (!empty($object->trueWeight)) {
@@ -1071,7 +1082,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 
 		$pdf->SetFont('', '', $default_font_size + 1);
 
-		// Date prévue depart
+		// Expected departure date
 		if (!empty($object->date_prevue_depart)) {
 			$posy += 4;
 			$pdf->SetXY($posx, $posy);
@@ -1079,7 +1090,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 			$pdf->MultiCell($w, 4, $outputlangs->transnoentities("DatePrevueDepart")." : ".dol_print_date($object->date_prevue_depart, "day", false, $outputlangs, true), '', 'R');
 		}
 
-		// Date prévue arrivée
+		// Expected arrival date
 		if (!empty($object->date_prevue_arrivee)) {
 			$posy += 4;
 			$pdf->SetXY($posx, $posy);
@@ -1095,7 +1106,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 			$pdf->MultiCell($w, 4, $outputlangs->transnoentities("DateReelleDepart")." : ".dol_print_date($object->date_reelle_depart, "day", false, $outputlangs, true), '', 'R');
 		}
 
-		// Date reelle arrivée
+		// Actual arrival date
 		if (!empty($object->date_reelle_arrivee)) {
 			$posy += 4;
 			$pdf->SetXY($posx, $posy);
@@ -1107,7 +1118,7 @@ class pdf_eagle extends ModelePDFStockTransfer
 			$posy += 4;
 			$pdf->SetXY($posx, $posy);
 			$pdf->SetTextColor(0, 0, 60);
-			$pdf->MultiCell($w, 3, $outputlangs->transnoentities("CustomerCode")." : ".$outputlangs->transnoentities($object->thirdparty->code_client), '', 'R');
+			$pdf->MultiCell($w, 3, $outputlangs->transnoentities("CustomerCode")." : ".$outputlangs->transnoentities((string) $object->thirdparty->code_client), '', 'R');
 		}
 
 
@@ -1125,12 +1136,13 @@ class pdf_eagle extends ModelePDFStockTransfer
 			$classname = ucfirst($origin);
 			$linkedobject = new $classname($this->db);
 			'@phan-var-force CommonObject $linkedobject';
+			/** @var CommonObject $linkedobject */
 			$result = $linkedobject->fetch($origin_id);
-			if ($result >= 0) {
+			if ($result > 0) {
 				//$linkedobject->fetchObjectLinked()   Get all linked object to the $linkedobject (commonly order) into $linkedobject->linkedObjects
 
 				$pdf->SetFont('', '', $default_font_size - 2);
-				$text = $linkedobject->ref;
+				$text = (string) $linkedobject->ref;
 				if (isset($linkedobject->ref_client) && !empty($linkedobject->ref_client)) {
 					$text .= ' ('.$linkedobject->ref_client.')';
 				}

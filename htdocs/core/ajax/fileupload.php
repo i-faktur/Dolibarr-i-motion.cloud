@@ -69,12 +69,14 @@ if ($usesublevelpermission && !$user->hasRight($module, $element)) {	// There is
 // Security check
 if (!empty($user->socid)) {
 	$socid = $user->socid;
-	if (!empty($object->socid) && $socid != $object->socid) {
+	if (property_exists($object, 'socid') && !empty($object->socid) && $socid != $object->socid) {	// @phan-suppress-current-line PhanUndeclaredProperty
 		httponly_accessforbidden("Access on object not allowed for this external user.");	// This includes the exit.
 	}
 }
 
-$result = restrictedArea($user, $object->module, $object, $object->table_element, $usesublevelpermission, 'fk_soc', 'rowid', 0, 1);	// Call with mode return
+// Mode 'write': storing a file into the documents of the object needs the permission to write on it, not only to read it.
+// Without it, restrictedArea() deduces the intent from GETPOST('sendit') and action=upload, which an ajax upload never sends.
+$result = restrictedArea($user, $object->module, $object, $object->table_element, $usesublevelpermission, 'fk_soc', 'rowid', 0, 1, 'write');	// Call with mode return
 if (!$result) {
 	httponly_accessforbidden('Not allowed by restrictArea (module='.$object->module.' table_element='.$object->table_element.')');
 }

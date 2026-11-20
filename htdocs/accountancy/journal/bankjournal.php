@@ -8,11 +8,11 @@
  * Copyright (C) 2013-2025	Alexandre Spangaro			<alexandre@inovea-conseil.com>
  * Copyright (C) 2013-2014	Florian Henry				<florian.henry@open-concept.pro>
  * Copyright (C) 2013-2014	Olivier Geffroy				<jeff@jeffinfo.com>
- * Copyright (C) 2017-2025  Frédéric France				<frederic.france@free.fr>
+ * Copyright (C) 2017-2026  Frédéric France				<frederic.france@free.fr>
  * Copyright (C) 2018		Ferran Marcet				<fmarcet@2byte.es>
  * Copyright (C) 2018-2024	Eric Seigne					<eric.seigne@cap-rel.fr>
  * Copyright (C) 2021		Gauthier VERDOL				<gauthier.verdol@atm-consulting.fr>
- * Copyright (C) 2024-2025	MDW							<mdeweerd@users.noreply.github.com>
+ * Copyright (C) 2024-2026	MDW							<mdeweerd@users.noreply.github.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -146,7 +146,7 @@ if (!GETPOSTISSET('date_startmonth') && (empty($date_start) || empty($date_end))
 
 // Get all bank lines
 //-------------------------------------
-$sql  = "SELECT b.rowid, b.dateo as do, b.datev as dv, b.amount, b.amount_main_currency, b.label, b.rappro, b.num_releve, b.num_chq, b.fk_type, b.fk_account,";
+$sql  = "SELECT b.rowid, b.dateo as do, b.datev as dv, b.amount, b.amount_main_currency, b.label, b.rappro, b.num_releve, b.num_chq, b.fk_type, b.fk_account, b.numero_compte,";
 $sql .= " ba.courant, ba.ref as baref, ba.account_number, ba.fk_accountancy_journal,";
 $sql .= " soc.rowid as socid, soc.nom as name, soc.email as email, bu1.type as typeop_company,";
 if (getDolGlobalString('MAIN_COMPANY_PERENTITY_SHARED')) {
@@ -195,6 +195,21 @@ if ($only_rappro == 2) {
 }
 $sql .= " ORDER BY b.datev";
 //print $sql;
+
+// Preload payment account codes by payment type from c_paiement
+$accountancy_code_by_payment = array();
+$sql2 = "SELECT code, accountancy_code";
+$sql2 .= " FROM ".MAIN_DB_PREFIX."c_paiement";
+$sql2 .= " WHERE entity IN (".getEntity('c_paiement').")";
+$sql2 .= " AND active = 1";
+$resql = $db->query($sql2);
+if ($resql) {
+	while ($objp = $db->fetch_object($resql)) {
+		if (!empty($objp->code) && !empty($objp->accountancy_code)) {
+			$accountancy_code_by_payment[$objp->code] = $objp->accountancy_code;
+		}
+	}
+}
 
 $object = new Account($db);
 $paymentstatic = new Paiement($db);
@@ -295,6 +310,11 @@ if ($result) {
 		// Set accountancy code for bank
 		$compta_bank = $obj->account_number;
 
+		// Determining the bank account by payment method
+		if (!empty($obj->fk_type) && !empty($accountancy_code_by_payment[$obj->fk_type])) {
+			$compta_bank = $accountancy_code_by_payment[$obj->fk_type];
+		}
+
 		// Set accountancy code for thirdparty (example: '411CU...' or '411' if no subledger account defined on customer)
 		$compta_soc = 'NotDefined';
 		$accountancy_code_general = 'NotDefined';
@@ -362,6 +382,34 @@ if ($result) {
 			$amounttouse = $obj->amount_main_currency;
 		}
 
+		// in case option FACTURE_PAYMENTS_ON_DIFFERENT_THIRDPARTIES_BILLS is on, payment could be for more than one third-partie
+		// so we have to find which part of the payment is affected to each third-parties
+		// (because in this case $obj-amount = the total of the paiement and not the paiement for each third-parties)
+		if (getDolGlobalString('FACTURE_PAYMENTS_ON_DIFFERENT_THIRDPARTIES_BILLS') && ($lineisapurchase == 1 || $lineisasale == 1)) {
+			if ($lineisapurchase == 1) {
+				$sqlamount = "SELECT SUM(pf.amount) as amount";
+				$sqlamount .= " FROM ".MAIN_DB_PREFIX."paiementfourn_facturefourn AS pf";
+				$sqlamount .= " INNER JOIN ".MAIN_DB_PREFIX."paiementfourn AS p ON pf.fk_paiementfourn = p.rowid";
+				$sqlamount .= " RIGHT JOIN ".MAIN_DB_PREFIX."facture AS f ON pf.fk_facturefourn = f.rowid";
+				$sqlamount .= " WHERE p.fk_bank = ".((int) $obj->rowid);
+				$sqlamount .= " AND f.fk_soc = ".((int) $obj->socid);
+			} else {
+				$sqlamount = "SELECT SUM(pf.amount) as amount";
+				$sqlamount .= " FROM ".MAIN_DB_PREFIX."paiement_facture AS pf";
+				$sqlamount .= " INNER JOIN ".MAIN_DB_PREFIX."paiement AS p ON pf.fk_paiement = p.rowid";
+				$sqlamount .= " RIGHT JOIN ".MAIN_DB_PREFIX."facture AS f ON pf.fk_facture = f.rowid";
+				$sqlamount .= " WHERE p.fk_bank = ".((int) $obj->rowid);
+				$sqlamount .= " AND f.fk_soc = ".((int) $obj->socid);
+			}
+			$resultamount = $db->query($sqlamount);
+			if ($resultamount) {
+				$objamount = $db->fetch_object($resultamount);
+				if (!empty($objamount->amount)) {
+					$amounttouse = $objamount->amount;
+				}
+			}
+		}
+
 		// get_url may return -1 which is not traversable
 		if (is_array($links) && count($links) > 0) {
 			// Test if entry is for a social contribution, salary or expense report.
@@ -427,10 +475,17 @@ if ($result) {
 					$societestatic->email = $tabcompany[$obj->rowid]['email'];
 					$tabpay[$obj->rowid]["soclib"] = $societestatic->getNomUrl(1, '', 30);
 					if ($compta_soc) {
-						if (empty($tabtp[$obj->rowid][$compta_soc])) {
-							$tabtp[$obj->rowid][$compta_soc] = $amounttouse;
-						} else {
-							$tabtp[$obj->rowid][$compta_soc] += $amounttouse;
+						// because we are in 2 loop (loop on the line from the sql queries and loop on $links)
+						// and in case of option FACTURE_PAYMENTS_ON_DIFFERENT_THIRDPARTIES_BILLS is on,
+						// we will pass here n times for each payment line
+						// so we have to add $amoutouse only if the line $links[$key] correspond to the payment line we are in used ( socid correspondinf at the payment line $links)
+						// if FACTURE_PAYMENTS_ON_DIFFERENT_THIRDPARTIES_BILLS is off we add $amounttouse
+						if (!getDolGlobalString('FACTURE_PAYMENTS_ON_DIFFERENT_THIRDPARTIES_BILLS') || $obj->socid == $links[$key]['url_id']) {
+							if (empty($tabtp[$obj->rowid][$compta_soc])) {
+								$tabtp[$obj->rowid][$compta_soc] = $amounttouse;
+							} else {
+								$tabtp[$obj->rowid][$compta_soc] += $amounttouse;
+							}
 						}
 					}
 				} elseif ($links[$key]['type'] == 'user') {
@@ -460,7 +515,11 @@ if ($result) {
 						if ($is_sc) {
 							//$tabcompany[$obj->rowid][$compta_user] += $amounttouse;
 						} else {
-							$tabtp[$obj->rowid][$compta_user] += $amounttouse;
+							if (empty($tabtp[$obj->rowid][$compta_user])) {
+								$tabtp[$obj->rowid][$compta_user] = $amounttouse;
+							} else {
+								$tabtp[$obj->rowid][$compta_user] += $amounttouse;
+							}
 						}
 					}
 				} elseif ($links[$key]['type'] == 'sc') {
@@ -561,7 +620,11 @@ if ($result) {
 							$accountancy_code_user_general = (!empty($obj->accountancy_code_user_general)) ? $obj->accountancy_code_user_general : $account_employee;
 							$compta_user = $userstatic->accountancy_code;
 							if ($compta_user) {
-								$tabtp[$obj->rowid][$compta_user] += $amounttouse;
+								if (empty($tabtp[$obj->rowid][$compta_user])) {
+									$tabtp[$obj->rowid][$compta_user] = $amounttouse;
+								} else {
+									$tabtp[$obj->rowid][$compta_user] += $amounttouse;
+								}
 								$tabuser[$obj->rowid] = array(
 								'id' => $userstatic->id,
 								'name' => dolGetFirstLastname($userstatic->firstname, $userstatic->lastname),
@@ -586,7 +649,7 @@ if ($result) {
 					$tabpay[$obj->rowid]["lib"] .= ' '.$paymentvariousstatic->getNomUrl(2);
 					$tabpay[$obj->rowid]["paymentvariousid"] = $paymentvariousstatic->id;
 					$paymentvariousstatic->fetch($paymentvariousstatic->id);
-					$account_various = (!empty($paymentvariousstatic->accountancy_code) ? $paymentvariousstatic->accountancy_code : 'NotDefined'); // NotDefined is a reserved word
+					$account_various = (!empty($paymentvariousstatic->accountancy_code) ? $paymentvariousstatic->accountancy_code : (!empty($obj->numero_compte) ? $obj->numero_compte : 'NotDefined')); // NotDefined is a reserved word
 					$account_subledger = (!empty($paymentvariousstatic->subledger_account) ? $paymentvariousstatic->subledger_account : ''); // NotDefined is a reserved word
 					$tabpay[$obj->rowid]["account_various"] = $account_various;
 					$tabtp[$obj->rowid][$account_subledger] = isset($tabtp[$obj->rowid][$account_subledger]) ? $tabtp[$obj->rowid][$account_subledger] + $amounttouse : $amounttouse;
@@ -626,7 +689,7 @@ if ($result) {
 		}
 
 		// If no links were found to know the amount on thirdparty, we try to guess it.
-		// This may happens on bank entries without the links lines to 'company'.
+		// This may happen on bank entries without the links lines to 'company'.
 		if (empty($tabtp[$obj->rowid]) && !empty($tabmoreinfo[$obj->rowid]['withdraw'])) {	// If we don't find 'company' link because it is an old 'withdraw' record
 			foreach ($links as $key => $val) {
 				if ($links[$key]['type'] == 'payment') {
@@ -721,7 +784,7 @@ if (!$error && $action == 'writebookkeeping' && $user->hasRight('accounting', 'b
 					$bookkeeping->doc_date = $val["date"];
 					$bookkeeping->doc_ref = $ref;
 					$bookkeeping->doc_type = 'bank';
-					$bookkeeping->fk_doc = $key;
+					$bookkeeping->fk_doc = (int) $key;
 					$bookkeeping->fk_docdet = $val["fk_bank"];
 
 					$bookkeeping->numero_compte = $k;
@@ -783,7 +846,7 @@ if (!$error && $action == 'writebookkeeping' && $user->hasRight('accounting', 'b
 						$bookkeeping->doc_date = $val["date"];
 						$bookkeeping->doc_ref = $ref;
 						$bookkeeping->doc_type = 'bank';
-						$bookkeeping->fk_doc = $key;
+						$bookkeeping->fk_doc = (int) $key;
 						$bookkeeping->fk_docdet = $val["fk_bank"];
 
 						$bookkeeping->label_operation = $reflabel;
@@ -821,43 +884,85 @@ if (!$error && $action == 'writebookkeeping' && $user->hasRight('accounting', 'b
 						} elseif (in_array($tabtype[$key], array('sc', 'payment_sc'))) {   // If payment is payment of social contribution
 							$bookkeeping->subledger_account = '';
 							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(0, $k, true);	// TODO Use a cache
+							if (empty($conf->cache['accountingaccountincurrententity'][$k])) {
+								$accountingaccount = new AccountingAccount($db);
+								$accountingaccount->fetch(0, $k, true);
+								$conf->cache['accountingaccountincurrententity'][$k] = $accountingaccount;
+							} else {
+								$accountingaccount = $conf->cache['accountingaccountincurrententity'][$k];
+							}
 							$bookkeeping->numero_compte = $k;
 							$bookkeeping->label_compte = $accountingaccount->label;
 						} elseif ($tabtype[$key] == 'payment_vat') {
 							$bookkeeping->subledger_account = '';
 							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(0, $k, true);		// TODO Use a cache
+							if (empty($conf->cache['accountingaccountincurrententity'][$k])) {
+								$accountingaccount = new AccountingAccount($db);
+								$accountingaccount->fetch(0, $k, true);
+								$conf->cache['accountingaccountincurrententity'][$k] = $accountingaccount;
+							} else {
+								$accountingaccount = $conf->cache['accountingaccountincurrententity'][$k];
+							}
 							$bookkeeping->numero_compte = $k;
 							$bookkeeping->label_compte = $accountingaccount->label;
 						} elseif ($tabtype[$key] == 'payment_donation') {
 							$bookkeeping->subledger_account = '';
 							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(0, $k, true);		// TODO Use a cache
+							if (empty($conf->cache['accountingaccountincurrententity'][$k])) {
+								$accountingaccount = new AccountingAccount($db);
+								$accountingaccount->fetch(0, $k, true);
+								$conf->cache['accountingaccountincurrententity'][$k] = $accountingaccount;
+							} else {
+								$accountingaccount = $conf->cache['accountingaccountincurrententity'][$k];
+							}
 							$bookkeeping->numero_compte = $k;
 							$bookkeeping->label_compte = $accountingaccount->label;
 						} elseif ($tabtype[$key] == 'member') {
 							$bookkeeping->subledger_account = '';
 							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(0, $k, true);		// TODO Use a cache
+							if (empty($conf->cache['accountingaccountincurrententity'][$k])) {
+								$accountingaccount = new AccountingAccount($db);
+								$accountingaccount->fetch(0, $k, true);
+								$conf->cache['accountingaccountincurrententity'][$k] = $accountingaccount;
+							} else {
+								$accountingaccount = $conf->cache['accountingaccountincurrententity'][$k];
+							}
 							$bookkeeping->numero_compte = $k;
 							$bookkeeping->label_compte = $accountingaccount->label;
 						} elseif ($tabtype[$key] == 'payment_loan') {
 							$bookkeeping->subledger_account = '';
 							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(0, $k, true);		// TODO Use a cache
+							if (empty($conf->cache['accountingaccountincurrententity'][$k])) {
+								$accountingaccount = new AccountingAccount($db);
+								$accountingaccount->fetch(0, $k, true);
+								$conf->cache['accountingaccountincurrententity'][$k] = $accountingaccount;
+							} else {
+								$accountingaccount = $conf->cache['accountingaccountincurrententity'][$k];
+							}
 							$bookkeeping->numero_compte = $k;
 							$bookkeeping->label_compte = $accountingaccount->label;
 						} elseif ($tabtype[$key] == 'payment_various') {
 							$bookkeeping->subledger_account = $k;
 							$bookkeeping->subledger_label = $tabcompany[$key]['name'];
-							$accountingaccount->fetch(0, $tabpay[$key]["account_various"], true);	// TODO Use a cache
+							if (empty($conf->cache['accountingaccountincurrententity'][$tabpay[$key]["account_various"]])) {
+								$accountingaccount = new AccountingAccount($db);
+								$accountingaccount->fetch(0, $tabpay[$key]["account_various"], true);
+								$conf->cache['accountingaccountincurrententity'][$tabpay[$key]["account_various"]] = $accountingaccount;
+							} else {
+								$accountingaccount = $conf->cache['accountingaccountincurrententity'][$tabpay[$key]["account_various"]];
+							}
 							$bookkeeping->numero_compte = $tabpay[$key]["account_various"];
 							$bookkeeping->label_compte = $accountingaccount->label;
 						} elseif ($tabtype[$key] == 'banktransfert') {
 							$bookkeeping->subledger_account = '';
 							$bookkeeping->subledger_label = '';
-							$accountingaccount->fetch(0, $k, true);		// TODO Use a cache
+							if (empty($conf->cache['accountingaccountincurrententity'][$k])) {
+								$accountingaccount = new AccountingAccount($db);
+								$accountingaccount->fetch(0, $k, true);
+								$conf->cache['accountingaccountincurrententity'][$k] = $accountingaccount;
+							} else {
+								$accountingaccount = $conf->cache['accountingaccountincurrententity'][$k];
+							}
 							$bookkeeping->numero_compte = $k;
 							$bookkeeping->label_compte = $accountingaccount->label;
 						} else {
@@ -908,7 +1013,7 @@ if (!$error && $action == 'writebookkeeping' && $user->hasRight('accounting', 'b
 						$bookkeeping->doc_date = $val["date"];
 						$bookkeeping->doc_ref = $ref;
 						$bookkeeping->doc_type = 'bank';
-						$bookkeeping->fk_doc = $key;
+						$bookkeeping->fk_doc = (int) $key;
 						$bookkeeping->fk_docdet = $val["fk_bank"];
 						$bookkeeping->montant = $mt;
 						$bookkeeping->sens = ($mt < 0) ? 'D' : 'C';
@@ -1578,9 +1683,9 @@ function getSourceDocRef($val, $typerecord)
 		$sqlmid .= " WHERE sc.rowid=".((int) $val["paymentscid"]);
 		$ref = $langs->transnoentitiesnoconv("SocialContribution");
 	} elseif ($typerecord == 'payment_vat') {
-		$sqlmid = 'SELECT v.rowid as ref';
-		$sqlmid .= " FROM ".MAIN_DB_PREFIX."tva as v";
-		$sqlmid .= " WHERE v.rowid=".((int) $val["paymentvatid"]);
+		$sqlmid = 'SELECT pv.fk_tva as ref';	// paymentvatid is the id of the payment, the ref is the id of the VAT declaration it pays
+		$sqlmid .= " FROM ".MAIN_DB_PREFIX."payment_vat as pv";
+		$sqlmid .= " WHERE pv.rowid=".((int) $val["paymentvatid"]);
 		$ref = $langs->transnoentitiesnoconv("PaymentVat");
 	} elseif ($typerecord == 'payment_donation') {
 		$sqlmid = 'SELECT payd.fk_donation as ref';

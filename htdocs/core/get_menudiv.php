@@ -91,7 +91,7 @@ $left = ($langs->trans("DIRECTION") == 'rtl' ? 'right' : 'left');
  */
 
 // Important: Following code is to avoid page request by browser and PHP CPU at each Dolibarr page access.
-if (empty($dolibarr_nocache) && GETPOSTINT('cache')) {
+if (GETPOSTINT('cache')) {
 	header('Cache-Control: max-age='.GETPOSTINT('cache').', public, must-revalidate');
 	// For a .php, we must set an Expires to avoid to have it forced to an expired value by the web server
 	header('Expires: '.gmdate('D, d M Y H:i:s', dol_now('gmt') + GETPOSTINT('cache')).' GMT');
@@ -130,21 +130,12 @@ print '
         display: none;
     }
 
-	ul li.lilevel2 {
-		padding-'.$left.': 60px;		/* width = 20 for level0, 20 for level1 */
-	}
-	ul li.lilevel3 {
-		padding-'.$left.': 60px;		/* width = 20 for level0, 20 for level1 */
-	}
-	ul li.lilevel4 {
-		padding-'.$left.': 60px;		/* width = 20 for level0, 20 for level1 */
-	}
-	ul li.lilevel5 {
-		padding-'.$left.': 60px;		/* width = 20 for level0, 20 for level1 */
-	}
-
 	.getmenudiv a:hover {
 		text-decoration: none;
+	}
+
+	.ulmenu li.lilevel0 {
+    	border-bottom: 1px solid #ccc;
 	}
 
 	.pictofixedwidth {
@@ -152,17 +143,20 @@ print '
     	padding-'.$right.': 8px !important;
 	}
 
-	li.lilevel1 > a, li.lilevel1 > i {
+	li.lilevel1 > a, li.lilevel1 > i, li.lilevel1 > span {
 		padding-'.$left.': 30px !important;
 	}
 	li.lilevel2 a {
 		padding-'.$left.': 60px !important;
 	}
 	li.lilevel3 a {
-		padding-'.$left.': 85px !important;
+		padding-'.$left.': 40px !important;
 	}
 	li.lilevel4 a {
-		padding-'.$left.': 105px !important;
+		padding-'.$left.': 0px !important;
+	}
+	li.lilevel5 a {
+		padding-'.$left.': 0px !important;
 	}
 
     a.alilevel0, span.spanlilevel0 {
@@ -199,11 +193,10 @@ print '
         margin-right: 0px;
         margin-left: 0px;
     }
-    li.lilevel1 a {
+    li.lilevel1 a, li.lilevel1 > span {
         padding-bottom: 5px;
     }
-	li.lilevel1 > a, li.lilevel1 > i {
-        /* background-image: url(\''.DOL_URL_ROOT.'/theme/'.urlencode($conf->theme).'/img/puce.png\') !important; */
+	li.lilevel1 > a, li.lilevel1 > i, li.lilevel1 > span {
         background-repeat: no-repeat !important;';
 if ($langs->trans("DIRECTION") == 'rtl') {
 	print 'background-position: right;';
@@ -213,7 +206,7 @@ if ($langs->trans("DIRECTION") == 'rtl') {
 print '	background-position-y: 1px;
 		padding-'.$left.': 20px;
 	}
-    li.lilevel1 a, li.lilevel1 {
+    li.lilevel1 a, li.lilevel1 > span, li.lilevel1 {
         color: #000;
         cursor: pointer;
         display: block;
@@ -250,7 +243,7 @@ print '	background-position-y: 1px;
     li.lilevel3:last-child {
         padding-bottom: 10px;
     }
-    a.alilevel0, li.lilevel1 a {
+    a.alilevel0, li.lilevel1 a, li.lilevel1 > span {
         text-overflow: ellipsis;
         overflow: hidden;
         white-space: nowrap;
@@ -263,12 +256,12 @@ print '	background-position-y: 1px;
 
 <script nonce="'.getNonce().'" type="text/javascript">
 $(document).ready(function(){
-    $("body ul").click(function(){
-        console.log("We click on body ul");
+    $("body li").click(function(){
+        console.log("We click on a li");
 
-        $(this).siblings().find("li ul").slideUp(0);
+        $(this).siblings().find("ul").slideUp(0);
 
-        $(this).find("li ul").slideToggle(200);
+        $(this).find("ul").slideToggle(200);
 
         var target = $(this);
         $(\'html, body\').animate({

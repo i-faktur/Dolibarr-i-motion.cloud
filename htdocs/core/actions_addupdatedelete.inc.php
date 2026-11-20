@@ -1,6 +1,6 @@
 <?php
 /* Copyright (C) 2017-2019  Laurent Destailleur     <eldy@users.sourceforge.net>
- * Copyright (C) 2024		MDW						<mdeweerd@users.noreply.github.com>
+ * Copyright (C) 2024-2025	MDW						<mdeweerd@users.noreply.github.com>
  * Copyright (C) 2024-2025  Frédéric France         <frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -39,6 +39,9 @@
 @phan-var-force string $hidedetails
 @phan-var-force string $hidedesc
 @phan-var-force string $hideref
+@phan-var-force ?string $confirm
+@phan-var-force ?int $lineid
+@phan-var-force ?int $id
 ';
 /**
  * @var Conf $conf
@@ -124,9 +127,19 @@ if ($action == 'add' && !empty($permissiontoadd)) {
 		if (preg_match('/^text/', $object->fields[$key]['type'])) {
 			$tmparray = explode(':', $object->fields[$key]['type']);
 			if (!empty($tmparray[1])) {
-				$value = GETPOST($key, $tmparray[1]);
+				$check = $tmparray[1];
 			} else {
-				$value = GETPOST($key, 'nohtml');
+				$check = 'nohtml';
+			}
+			if (getDolGlobalString('MAIN_SECURITY_DISALLOW_UNSECURED_TEXT')) {
+				$security_check = 'alphanohtml';
+			} else {
+				$security_check = $check;
+			}
+			if (!empty($tmparray[1])) {
+				$value = GETPOST($key, $security_check);
+			} else {
+				$value = GETPOST($key, $security_check);
 				if (!empty($object->fields[$key]['arrayofkeyval']) && !empty($object->fields[$key]['multiinput'])) {
 					$tmparraymultiselect = GETPOST($key.'_multiselect', 'array');
 					foreach ($tmparraymultiselect as $tmpvalue) {
@@ -153,7 +166,7 @@ if ($action == 'add' && !empty($permissiontoadd)) {
 			$value = ((GETPOST($key) == '1' || GETPOST($key) == 'on') ? 1 : 0);
 		} elseif ($object->fields[$key]['type'] == 'reference') {
 			$tmparraykey = array_keys($object->param_list);
-			$value = $tmparraykey[GETPOST($key)].','.GETPOST($key.'2');
+			$value = $tmparraykey[(int) GETPOST($key)].','.GETPOST($key.'2');
 		} elseif (preg_match('/^chkbxlst:(.*)/', $object->fields[$key]['type']) || $object->fields[$key]['type'] == 'checkbox') {
 			$value = '';
 			$values_arr = GETPOST($key, 'array');
@@ -173,11 +186,14 @@ if ($action == 'add' && !empty($permissiontoadd)) {
 		if (!empty($object->fields[$key]['foreignkey']) && $value == '-1') {
 			$value = ''; // This is an explicit foreign key field
 		}
+		if ((preg_match('/^sellist/i', $object->fields[$key]['type']) || $object->fields[$key]['type'] == 'select') && $value === '0') {
+			$value = ''; // sellist / select blank option posts "0"; normalize to '' so notnull check works on PHP 8.0+ (see github.com/Dolibarr/dolibarr/issues/38199)
+		}
 
 		//var_dump($key.' '.$value.' '.$object->fields[$key]['type'].' '.$object->fields[$key]['notnull']);
 
 		$object->$key = $value;
-		if (!empty($val['notnull']) && $val['notnull'] > 0 && $object->$key == '' && isset($val['default']) && $val['default'] == '(PROV)') {
+		if (!empty($val['notnull']) && $val['notnull'] > 0 && $object->$key == '' && isset($val['default']) && $val['default'] === '(PROV)') {
 			$object->$key = '(PROV)';
 		}
 		if ($key == 'pass_crypted') {
@@ -283,9 +299,19 @@ if ($action == 'update' && !empty($permissiontoadd)) {
 		if (preg_match('/^text/', $object->fields[$key]['type'])) {
 			$tmparray = explode(':', $object->fields[$key]['type']);
 			if (!empty($tmparray[1])) {
-				$value = GETPOST($key, $tmparray[1]);
+				$check = $tmparray[1];
 			} else {
-				$value = GETPOST($key, 'nohtml');
+				$check = 'nohtml';
+			}
+			if (getDolGlobalString('MAIN_SECURITY_DISALLOW_UNSECURED_TEXT')) {
+				$security_check = 'alphanohtml';
+			} else {
+				$security_check = $check;
+			}
+			if (!empty($tmparray[1])) {
+				$value = GETPOST($key, $security_check);
+			} else {
+				$value = GETPOST($key, $security_check);
 				if (!empty($object->fields[$key]['arrayofkeyval']) && !empty($object->fields[$key]['multiinput'])) {
 					$tmparraymultiselect = GETPOST($key.'_multiselect', 'array');
 					foreach ($tmparraymultiselect as $keytmp => $tmpvalue) {
@@ -315,7 +341,7 @@ if ($action == 'update' && !empty($permissiontoadd)) {
 		} elseif ($object->fields[$key]['type'] == 'boolean') {
 			$value = ((GETPOST($key, 'aZ09') == 'on' || GETPOST($key, 'aZ09') == '1') ? 1 : 0);
 		} elseif ($object->fields[$key]['type'] == 'reference') {
-			$value = array_keys($object->param_list)[GETPOST($key)].','.GETPOST($key.'2');
+			$value = array_keys($object->param_list)[(int) GETPOST($key)].','.GETPOST($key.'2');
 		} elseif (preg_match('/^chkbxlst:/', $object->fields[$key]['type']) || $object->fields[$key]['type'] == 'checkbox') {
 			$value = '';
 			$values_arr = GETPOST($key, 'array');
@@ -334,6 +360,9 @@ if ($action == 'update' && !empty($permissiontoadd)) {
 		}
 		if (!empty($object->fields[$key]['foreignkey']) && $value == '-1') {
 			$value = ''; // This is an explicit foreign key field
+		}
+		if ((preg_match('/^sellist/i', $object->fields[$key]['type']) || $object->fields[$key]['type'] == 'select') && $value === '0') {
+			$value = ''; // sellist / select blank option posts "0"; normalize to '' so notnull check works on PHP 8.0+ (see github.com/Dolibarr/dolibarr/issues/38199)
 		}
 
 		$object->$key = $value;
@@ -427,7 +456,7 @@ if (preg_match('/^set(\w+)$/', $action, $reg) && GETPOSTINT('id') > 0 && !empty(
 $permissiontoeditextra = $permissiontoadd;
 if (GETPOST('attribute', 'aZ09') && isset($extrafields->attributes[$object->table_element]['perms'][GETPOST('attribute', 'aZ09')])) {
 	// For action 'update_extras', is there a specific permission set for the attribute to update
-	$permissiontoeditextra = dol_eval($extrafields->attributes[$object->table_element]['perms'][GETPOST('attribute', 'aZ09')]);
+	$permissiontoeditextra = dol_eval((string) $extrafields->attributes[$object->table_element]['perms'][GETPOST('attribute', 'aZ09')]);
 }
 
 if ($action == "update_extras" && GETPOSTINT('id') > 0 && !empty($permissiontoeditextra)) {
@@ -446,7 +475,7 @@ if ($action == "update_extras" && GETPOSTINT('id') > 0 && !empty($permissiontoed
 		setEventMessages($extrafields->error, $object->errors, 'errors');
 		$action = 'edit_extras';
 	} else {
-		$result = $object->updateExtraField($attribute, empty($triggermodname) ? '' : $triggermodname, $user);
+		$result = $object->updateExtraField($attribute, empty($triggermodname) ? '' : $triggermodname, $user);	// TODO Remove $triggermodname to use $object->TRIGGER_PREFIX.'_MODIFY' instead
 		if ($result > 0) {
 			setEventMessages($langs->trans('RecordSaved'), null, 'mesgs');
 			$action = 'view';
@@ -459,7 +488,7 @@ if ($action == "update_extras" && GETPOSTINT('id') > 0 && !empty($permissiontoed
 }
 
 // Action to delete
-if ($action == 'confirm_delete' && !empty($permissiontodelete)) {
+if ($action == 'confirm_delete' && $confirm == 'yes' && !empty($permissiontodelete)) {
 	if (!($object->id > 0)) {
 		dol_print_error(null, 'Error, object must be fetched before being deleted');
 		exit;

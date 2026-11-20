@@ -1,7 +1,7 @@
 <?php
-/* Copyright (C) 2006-2018	Laurent Destailleur	<eldy@users.sourceforge.net>
- * Copyright (C) 2006-2021	Regis Houssin		<regis.houssin@inodbox.com>
- * Copyright (C) 2024		Frédéric France			<frederic.france@free.fr>
+/* Copyright (C) 2006-2018	Laurent Destailleur		<eldy@users.sourceforge.net>
+ * Copyright (C) 2006-2021	Regis Houssin			<regis.houssin@inodbox.com>
+ * Copyright (C) 2024-2025  Frédéric France			<frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,7 +20,9 @@
 /**
  *		\file 		htdocs/admin/tools/dolibarr_export.php
  *		\ingroup	core
- *		\brief      Page to export database
+ *		\brief      Page to export database.
+ *				    See the file export_files.php for code to build a zip of documents
+ *					See the file export.php for code to build a dump file.
  */
 
 // Load Dolibarr environment
@@ -30,6 +32,9 @@ require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
 require_once DOL_DOCUMENT_ROOT.'/core/class/html.formfile.class.php';
 
 /**
+ * @var string $dolibarr_main_db_name
+ * @var string $dolibarr_main_db_user
+ * @var string $dolibarr_main_restrict_os_commands
  * @var Conf $conf
  * @var DoliDB $db
  * @var HookManager $hookmanager
@@ -144,15 +149,14 @@ print "</script>\n";
 $title = $langs->trans("Backup");
 
 print load_fiche_titre($title, '', 'title_setup');
-//print_barre_liste($langs->trans("Backup"), '', '', '', '', '', $langs->trans("BackupDesc",DOL_DATA_ROOT), 0, 0, 'title_setup');
 
 print '<div class="center">';
-print $langs->trans("BackupDesc", DOL_DATA_ROOT);
+print $langs->trans("BackupDesc", 3);
 print '</div>';
 print '<br>';
 
 print "<!-- Dump of a server -->\n";
-print '<form method="post" action="'.DOL_URL_ROOT.'/admin/tools/export.php" name="dump">';
+print '<form method="post" action="'.DOL_URL_ROOT.'/admin/tools/export.php" name="dump" spellcheck="false">';
 print '<input type="hidden" name="token" value="'.newToken().'" />';
 print '<input type="hidden" name="export_type" value="server" />';
 print '<input type="hidden" name="page_y" value="" />';
@@ -161,7 +165,7 @@ print '<fieldset id="fieldsetexport"><legend class="legendforfieldsetstep" style
 
 print '<span class="opacitymedium">';
 print $langs->trans("BackupDesc3", $dolibarr_main_db_name).'<br>';
-//print $langs->trans("BackupDescY").'<br>';
+print $langs->trans("BackupDescY").'<br>';
 print '</span>';
 
 print '<br>';
@@ -249,7 +253,7 @@ if (in_array($type, array('mysql', 'mysqli'))) {
 	} else {
 		$fullpathofmysqldump = getDolGlobalString('SYSTEMTOOLS_MYSQLDUMP');
 	}
-	print '<input type="text" name="mysqldump" style="width: 80%" value="'.$fullpathofmysqldump.'">';
+	print '<input type="text" name="mysqldump" style="width: 80%" value="'.$fullpathofmysqldump.'" spellcheck="false">';
 	print '</fieldset>';
 
 	print '<br>';
@@ -626,7 +630,7 @@ $title = $langs->trans("BackupZipWizard");
 print "<br>\n";
 print "<!-- Dump of a server -->\n";
 
-print '<form method="post" action="'.DOL_URL_ROOT.'/admin/tools/export_files.php" name="dump">';
+print '<form method="post" action="'.DOL_URL_ROOT.'/admin/tools/export_files.php" name="dump" spellcheck="false">';
 print '<input type="hidden" name="token" value="'.newToken().'" />';
 print '<input type="hidden" name="export_type" value="server" />';
 print '<input type="hidden" name="page_y" value="" />';
@@ -660,11 +664,27 @@ $filecompression = $compression;
 unset($filecompression['none']);
 $filecompression['zip'] = array('function' => 'dol_compress_dir', 'id' => 'radio_compression_zip', 'label' => $langs->trans("FormatZip"));
 
+// The gz, bz and zstd formats are built by export_files.php with OS commands (tar then a compressor). When
+// $dolibarr_main_restrict_os_commands is set (default since 24.0.1), Utils::executeCLI() refuses any command not in
+// the list, so a format whose commands are not allowed must not be offered.
+$oscommandsforformat = array('gz' => array('tar', 'gzip'), 'bz' => array('tar', 'bzip2'), 'zstd' => array('tar', 'zstd'));
+$arrayofallowedcommand = array();
+if (!empty($dolibarr_main_restrict_os_commands)) {
+	$arrayofallowedcommand = array_map('trim', explode(',', $dolibarr_main_restrict_os_commands));
+}
+$disabledbyrestriction = array();
+foreach ($oscommandsforformat as $key => $commands) {
+	if (!empty($arrayofallowedcommand) && array_diff($commands, $arrayofallowedcommand)) {
+		$disabledbyrestriction[$key] = implode(', ', array_diff($commands, $arrayofallowedcommand));
+	}
+}
+$defaultcompression = empty($disabledbyrestriction['gz']) ? 'gz' : 'zip';
+
 $i = 0;
 foreach ($filecompression as $key => $val) {
-	if (!$val['function'] || function_exists($val['function'])) {	// Enabled export format
+	if ((!$val['function'] || function_exists($val['function'])) && empty($disabledbyrestriction[$key])) {	// Enabled export format
 		$checked = '';
-		if ($key == 'gz') {
+		if ($key == $defaultcompression) {
 			$checked = ' checked';
 		}
 		print '<input type="radio" name="compression" value="'.$key.'" id="'.$val['id'].'2"'.$checked.'>';
@@ -672,10 +692,17 @@ foreach ($filecompression as $key => $val) {
 	} else { // Disabled export format
 		print '<input type="radio" name="compression" value="'.$key.'" id="'.$val['id'].'2" disabled>';
 		print ' <label for="'.$val['id'].'2">'.$val['label'].'</label>';
-		print ' <span class="opacitymedium">('.$langs->trans("NotAvailable").')</span>';
+		if (!empty($disabledbyrestriction[$key])) {
+			print ' <span class="opacitymedium">('.$langs->trans("NotAvailableCommandNotAllowed", $disabledbyrestriction[$key]).')</span>';
+		} else {
+			print ' <span class="opacitymedium">('.$langs->trans("NotAvailable").')</span>';
+		}
 	}
 	print ' &nbsp; &nbsp; ';
 	$i++;
+}
+if (!empty($disabledbyrestriction)) {
+	print '<br><span class="opacitymedium small">'.$langs->trans("RestrictOsCommandsHelp", 'dolibarr_main_restrict_os_commands').'</span>';
 }
 
 print '</div>';
@@ -701,6 +728,34 @@ print '</fieldset>';
 print '</form>';
 
 print '<br>';
+
+
+print "<br>\n";
+print "<!-- Save setup conf -->\n";
+
+print '<fieldset><legend class="legendforfieldsetstep" style="font-size: 3em">3</legend>';
+
+print '<br>';
+
+print '<span class="opacitymedium">';
+print $langs->trans("BackupDesc4", 'dolibarr_main_dolcrypt_key '.$langs->transnoentitiesnoconv("or").' dolibarr_main_instance_unique_id').'<br>';
+print '</span>';
+
+print '<br>';
+
+print '<div id="backupfileright">';
+
+print $langs->trans("SeeValueIntoConfPhp").'<br>';
+print $langs->trans("SeeValueIntoConfPhp2");
+print '<br>';
+
+print '<br>';
+
+print '</div>';
+
+print '</fieldset>';
+
+print '<br><br>';
 
 // End of page
 llxFooter();

@@ -2,7 +2,7 @@
 /* Copyright (C) 2010-2012 	Laurent Destailleur <eldy@users.sourceforge.net>
  * Copyright (C) 2012		Juanjo Menent		<jmenent@2byte.es>
  * Copyright (C) 2018		Ferran Marcet		<fmarcet@2byte.es>
- * Copyright (C) 2018-2024  Frédéric France         <frederic.france@free.fr>
+ * Copyright (C) 2018-2025  Frédéric France         <frederic.france@free.fr>
  * Copyright (C) 2024		MDW							<mdeweerd@users.noreply.github.com>
  *
 * This program is free software; you can redistribute it and/or modify
@@ -60,6 +60,7 @@ class doc_generic_contract_odt extends ModelePDFContract
 		$this->db = $db;
 		$this->name = "ODT templates";
 		$this->description = $langs->trans("DocumentModelOdt");
+		$this->update_main_doc_field = 1; // Save the name of generated file as the main doc when generating a doc with this template
 		$this->scandir = 'CONTRACT_ADDON_PDF_ODT_PATH'; // Name of constant that is used to save list of directories to scan
 
 		// Page size for A4 format
@@ -151,7 +152,7 @@ class doc_generic_contract_odt extends ModelePDFContract
 		$texte .= getDolGlobalString('CONTRACT_ADDON_PDF_ODT_PATH');
 		$texte .= '</textarea>';
 		$texte .= '</div><div style="display: inline-block; vertical-align: middle;">';
-		$texte .= '<input type="submit" class="button reposition smallpaddingimp" value="'.dol_escape_htmltag($langs->trans("Upload")).'" name="upload">';
+		$texte .= '<input type="submit" class="button reposition smallpaddingimp" name="modify" value="'.dol_escape_htmltag($langs->trans("Modify")).'">';
 		$texte .= '<br></div></div>';
 
 		// Scan directories
@@ -159,7 +160,7 @@ class doc_generic_contract_odt extends ModelePDFContract
 		if (getDolGlobalString('CONTRACT_ADDON_PDF_ODT_PATH')) {
 			$texte .= $langs->trans("NumberOfModelFilesFound").': <b>';
 			//$texte.=$nbofiles?'<a id="a_'.get_class($this).'" href="#">':'';
-			$texte .= count($listoffiles);
+			$texte .= $nbofiles;
 			//$texte.=$nbofiles?'</a>':'';
 			$texte .= '</b>';
 		}
@@ -233,9 +234,9 @@ class doc_generic_contract_odt extends ModelePDFContract
 		$outputlangs->charset_output = 'UTF-8';
 
 		// Load translation files required by page
-		$outputlangs->loadLangs(array("main", "dict", "companies", "bills", "deliveries"));
+		$outputlangs->loadLangs(array("main", "dict", "companies", "bills", "sendginds"));
 
-		if ($conf->contract->multidir_output[$object->entity]) {
+		if ($conf->contract->multidir_output[$object->entity ?? $conf->entity]) {
 			// If $object is id instead of object
 			if (!is_object($object)) {
 				$id = $object;
@@ -249,8 +250,8 @@ class doc_generic_contract_odt extends ModelePDFContract
 
 			$object->fetch_thirdparty();
 
-			$dir = $conf->contract->multidir_output[$object->entity];
-			$objectref = dol_sanitizeFileName($object->ref);
+			$dir = $conf->contract->multidir_output[$object->entity ?? $conf->entity];
+			$objectref = dol_sanitizeFileName((string) $object->ref);
 			if (!preg_match('/specimen/i', $objectref)) {
 				$dir .= "/".$objectref;
 			}
@@ -391,7 +392,7 @@ class doc_generic_contract_odt extends ModelePDFContract
 				$reshook = $hookmanager->executeHooks('ODTSubstitution', $parameters, $this, $action); // Note that $action and $object may have been modified by some hooks
 				// retrieve the constant to apply a ratio for image size or set the ratio to 1
 				if (getDolGlobalString('MAIN_DOC_ODT_IMAGE_RATIO')) {
-					$ratio = floatval(getDolGlobalString('MAIN_DOC_ODT_IMAGE_RATIO'));
+					$ratio = (float) getDolGlobalString('MAIN_DOC_ODT_IMAGE_RATIO');
 				} else {
 					$ratio = 1;
 				}

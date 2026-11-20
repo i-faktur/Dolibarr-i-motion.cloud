@@ -3,7 +3,7 @@
  * Copyright (C) 2008-2012	Regis Houssin			<regis.houssin@inodbox.com>
  * Copyright (C) 2008-2011	Juanjo Menent			<jmenent@2byte.es>
  * Copyright (C) 2014       Teddy Andreotti    		<125155@supinfo.com>
- * Copyright (C) 2024		MDW						<mdeweerd@users.noreply.github.com>
+ * Copyright (C) 2024-2026	MDW						<mdeweerd@users.noreply.github.com>
  * Copyright (C) 2024       Frédéric France         <frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -42,6 +42,8 @@ if (isModEnabled('ldap')) {
  * @var HookManager $hookmanager
  * @var Translate $langs
  * @var User $user
+ *
+ * @var string $dolibarr_main_authentication
  */
 
 // Load translation files required by page
@@ -129,7 +131,8 @@ if (empty($reshook)) {
 	// Action to set a temporary password and send email for reset
 	if ($action == 'buildnewpassword' && $username) {	// Test on permission not required here. This action is done anonymously.
 		$sessionkey = 'dol_antispam_value';
-		$ok = (array_key_exists($sessionkey, $_SESSION) && (strtolower($_SESSION[$sessionkey]) == strtolower(GETPOST('code'))));
+		$ok = (array_key_exists($sessionkey, $_SESSION) && (strtolower($_SESSION[$sessionkey]) === strtolower(GETPOST('code'))));
+		unset($_SESSION[$sessionkey]);	// A code can be used only once. The page shows a new image, so a new code is set.
 
 		// Verify code
 		if (!$ok) {

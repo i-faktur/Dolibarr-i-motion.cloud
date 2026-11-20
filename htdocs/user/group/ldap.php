@@ -123,7 +123,7 @@ if (isModEnabled('multicompany')) {
 	print '<tr><td class="titlefield">'.$langs->trans("Name").'</td>';
 	print '<td class="valeur">'.$object->name;
 	if (!$object->entity) {
-		print img_picto($langs->trans("GlobalGroup"), 'redstar');
+		print img_picto($langs->trans("GlobalGroup"), 'superadmin');
 	}
 	print "</td></tr>\n";
 }
@@ -159,7 +159,7 @@ print dol_get_fiche_end();
 print '<div class="tabsAction">';
 
 if (getDolGlobalInt('LDAP_SYNCHRO_ACTIVE') === Ldap::SYNCHRO_DOLIBARR_TO_LDAP) {
-	print '<a class="butAction" href="'.$_SERVER["PHP_SELF"].'?id='.$object->id.'&amp;action=dolibarr2ldap">'.$langs->trans("ForceSynchronize").'</a>';
+	print '<a class="butAction" href="'.$_SERVER["PHP_SELF"].'?id='.$object->id.'&amp;action=dolibarr2ldap&amp;token='.newToken().'">'.$langs->trans("ForceSynchronize").'</a>';
 }
 
 print "</div>\n";

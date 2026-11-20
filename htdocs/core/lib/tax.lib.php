@@ -7,8 +7,8 @@
  * Copyright (C) 2012-2014  Raphaël Doursenaud  <rdoursenaud@gpcsolutions.fr>
  * Copyright (C) 2015       Marcos García       <marcosgdf@gmail.com>
  * Copyright (C) 2021-2022  Open-Dsi            <support@open-dsi.fr>
- * Copyright (C) 2024       Frédéric France             <frederic.france@free.fr>
- * Copyright (C) 2024		MDW							<mdeweerd@users.noreply.github.com>
+ * Copyright (C) 2024-2025  Frédéric France             <frederic.france@free.fr>
+ * Copyright (C) 2024-2026	MDW							<mdeweerd@users.noreply.github.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -98,6 +98,52 @@ function tax_prepare_head(ChargeSociales $object)
 
 
 /**
+ * Get the ratio for a legacy situation line, restricting previous lines and credits to its entity/cycle.
+ * Called only for sales situation invoices with INVOICE_USE_SITUATION = 1.
+ *
+ * @param DoliDB $db Database handle
+ * @param int $lineid Invoice line id
+ * @return float|false Situation ratio, or false on error
+ */
+function tax_get_situation_ratio($db, $lineid)
+{
+	$sql = 'SELECT d.situation_percent, d.fk_prev_id, f.situation_cycle_ref,';
+	$sql .= ' p.situation_percent as previous_progress, pf.rowid as previous_invoice_id,';
+	$sql .= ' (SELECT COALESCE(SUM(cd.situation_percent), 0)';
+	$sql .= ' FROM '.MAIN_DB_PREFIX.'facture as cf INNER JOIN '.MAIN_DB_PREFIX.'facturedet as cd ON cd.fk_facture = cf.rowid';
+	$sql .= ' WHERE cf.type = '.Facture::TYPE_CREDIT_NOTE.' AND cf.entity = f.entity';
+	$sql .= ' AND cf.situation_cycle_ref = f.situation_cycle_ref AND cd.fk_prev_id = d.fk_prev_id) as credit_progress';
+	$sql .= ' FROM '.MAIN_DB_PREFIX.'facturedet as d';
+	$sql .= ' INNER JOIN '.MAIN_DB_PREFIX.'facture as f ON f.rowid = d.fk_facture';
+	$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'facturedet as p ON p.rowid = d.fk_prev_id';
+	$sql .= ' LEFT JOIN '.MAIN_DB_PREFIX.'facture as pf ON pf.rowid = p.fk_facture';
+	$sql .= ' AND pf.entity = f.entity AND pf.situation_cycle_ref = f.situation_cycle_ref';
+	$sql .= ' WHERE d.rowid = '.((int) $lineid);
+	$sql .= ' AND f.entity IN ('.$db->sanitize(getEntity('facture')).') AND f.type = '.Facture::TYPE_SITUATION;
+	$result = $db->query($sql);
+	if (!$result) {
+		dol_print_error($db);
+		return false;
+	}
+	$row = $db->fetch_object($result);
+	$db->free($result);
+	if (!$row) {
+		return false;
+	}
+	$previousProgress = 0.0;
+	if (!empty($row->situation_cycle_ref) && !empty($row->fk_prev_id)) {
+		if (empty($row->previous_invoice_id)) {
+			dol_syslog(__FUNCTION__.': Invalid previous situation invoice', LOG_ERR);
+			return false;
+		}
+		$previousProgress = (float) $row->previous_progress + (float) $row->credit_progress;
+	}
+	$line = new FactureLigne($db);
+	$line->situation_percent = (float) $row->situation_percent;
+	return $line->getSituationRatio($previousProgress);
+}
+
+/**
  *  Look for collectable VAT clients in the chosen year (and month)
  *
  *  @param	'vat'|'localtax1'|'localtax2'	$type	Tax type, either 'vat', 'localtax1' or 'localtax2'
@@ -163,10 +209,10 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 	if (($direction == 'sell' && getDolGlobalString('TAX_MODE_SELL_PRODUCT') == 'invoice')
 		|| ($direction == 'buy' && getDolGlobalString('TAX_MODE_BUY_PRODUCT') == 'invoice')) {
 		// Count on delivery date (use invoice date as delivery is unknown)
-		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$fk_facture." as facid, d.$f_rate as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$total_tva." as total_vat, d.description as descr,";
-		$sql .= " d.".$total_localtax1." as total_localtax1, d.".$total_localtax2." as total_localtax2, ";
+		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$db->sanitize($fk_facture)." as facid, d.".$db->sanitize($f_rate)." as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$db->sanitize($total_tva)." as total_vat, d.description as descr,";
+		$sql .= " d.".$db->sanitize($total_localtax1)." as total_localtax1, d.".$db->sanitize($total_localtax2)." as total_localtax2, ";
 		$sql .= " d.date_start as date_start, d.date_end as date_end,";
-		$sql .= " f.".$invoicefieldref." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
+		$sql .= " f.".$db->sanitize($invoicefieldref)." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
 		$sql .= " s.nom as company_name, s.name_alias as company_alias, s.rowid as company_id, s.client as company_client, s.fournisseur as company_fournisseur, s.email as company_email,";
 		$sql .= " s.code_client as company_customer_code, s.code_fournisseur as company_supplier_code,";
 		$sql .= " s.code_compta as company_customer_accounting_code, s.code_compta_fournisseur as company_supplier_accounting_code,";
@@ -174,9 +220,9 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 		$sql .= " p.rowid as pid, p.ref as pref, p.fk_product_type as ptype, p.tosell as pstatus, p.tobuy as pstatusbuy,";
 		$sql .= " 0 as payment_id, '' as payment_ref, 0 as payment_amount";
 		$sql .= " ,'' as datep";
-		$sql .= " FROM ".MAIN_DB_PREFIX.$invoicetable." as f,";
+		$sql .= " FROM ".MAIN_DB_PREFIX.$db->sanitize($invoicetable)." as f,";
 		$sql .= " ".MAIN_DB_PREFIX."societe as s,";
-		$sql .= " ".MAIN_DB_PREFIX.$invoicedettable." as d";
+		$sql .= " ".MAIN_DB_PREFIX.$db->sanitize($invoicedettable)." as d";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."product as p on d.fk_product = p.rowid";
 		$sql .= " WHERE f.entity IN (".getEntity($invoicetable).")";
 		$sql .= " AND f.fk_statut in (1,2)"; // Validated or paid (partially or completely)
@@ -193,7 +239,7 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 				$sql .= " AND f.type IN (0,1,2,3,5)";
 			}
 		}
-		$sql .= " AND f.rowid = d.".$fk_facture;
+		$sql .= " AND f.rowid = d.".$db->sanitize($fk_facture);
 		$sql .= " AND s.rowid = f.fk_soc";
 		if ($y && $m) {
 			$sql .= " AND f.datef >= '".$db->idate(dol_get_first_day($y, $m, false))."'";
@@ -212,27 +258,27 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 		$sql .= " AND (d.product_type = 0"; // Limit to products
 		$sql .= " AND d.date_start is null AND d.date_end IS NULL)"; // enhance detection of products
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.".$total_tva." <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.".$db->sanitize($total_tva)." <> 0)";
 		}
-		$sql .= " ORDER BY d.rowid, d.".$fk_facture;
+		$sql .= " ORDER BY d.rowid, d.".$db->sanitize($fk_facture);
 	} else {
 		// Count on payments date
-		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$fk_facture." as facid, d.$f_rate as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$total_tva." as total_vat, d.description as descr,";
-		$sql .= " d.".$total_localtax1." as total_localtax1, d.".$total_localtax2." as total_localtax2, ";
+		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$db->sanitize($fk_facture)." as facid, d.".$db->sanitize($f_rate)." as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$db->sanitize($total_tva)." as total_vat, d.description as descr,";
+		$sql .= " d.".$db->sanitize($total_localtax1)." as total_localtax1, d.".$db->sanitize($total_localtax2)." as total_localtax2, ";
 		$sql .= " d.date_start as date_start, d.date_end as date_end,";
-		$sql .= " f.".$invoicefieldref." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
+		$sql .= " f.".$db->sanitize($invoicefieldref)." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
 		$sql .= " s.nom as company_name, s.name_alias as company_alias, s.rowid as company_id, s.client as company_client, s.fournisseur as company_fournisseur, s.email as company_email,";
 		$sql .= " s.code_client as company_customer_code, s.code_fournisseur as company_supplier_code,";
 		$sql .= " s.code_compta as company_customer_accounting_code, s.code_compta_fournisseur as company_supplier_accounting_code,";
 		$sql .= " s.status as company_status, s.tva_intra as company_tva_intra,";
 		$sql .= " p.rowid as pid, p.ref as pref, p.fk_product_type as ptype, p.tosell as pstatus, p.tobuy as pstatusbuy,";
-		$sql .= " pf.".$fk_payment." as payment_id, pf.amount as payment_amount,";
+		$sql .= " pf.".$db->sanitize($fk_payment)." as payment_id, pf.amount as payment_amount,";
 		$sql .= " pa.datep as datep, pa.ref as payment_ref";
-		$sql .= " FROM ".MAIN_DB_PREFIX.$invoicetable." as f,";
-		$sql .= " ".MAIN_DB_PREFIX.$paymentfacturetable." as pf,";
-		$sql .= " ".MAIN_DB_PREFIX.$paymenttable." as pa,";
+		$sql .= " FROM ".MAIN_DB_PREFIX.$db->sanitize($invoicetable)." as f,";
+		$sql .= " ".MAIN_DB_PREFIX.$db->sanitize($paymentfacturetable)." as pf,";
+		$sql .= " ".MAIN_DB_PREFIX.$db->sanitize($paymenttable)." as pa,";
 		$sql .= " ".MAIN_DB_PREFIX."societe as s,";
-		$sql .= " ".MAIN_DB_PREFIX.$invoicedettable." as d";
+		$sql .= " ".MAIN_DB_PREFIX.$db->sanitize($invoicedettable)." as d";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."product as p on d.fk_product = p.rowid";
 		$sql .= " WHERE f.entity IN (".getEntity($invoicetable).")";
 		$sql .= " AND f.fk_statut in (1,2)"; // Paid (partially or completely)
@@ -249,10 +295,10 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 				$sql .= " AND f.type IN (0,1,2,3,5)";
 			}
 		}
-		$sql .= " AND f.rowid = d.".$fk_facture;
+		$sql .= " AND f.rowid = d.".$db->sanitize($fk_facture);
 		$sql .= " AND s.rowid = f.fk_soc";
-		$sql .= " AND pf.".$fk_facture2." = f.rowid";
-		$sql .= " AND pa.rowid = pf.".$fk_payment;
+		$sql .= " AND pf.".$db->sanitize($fk_facture2)." = f.rowid";
+		$sql .= " AND pa.rowid = pf.".$db->sanitize($fk_payment);
 		if ($y && $m) {
 			$sql .= " AND pa.datep >= '".$db->idate(dol_get_first_day($y, $m, false))."'";
 			$sql .= " AND pa.datep <= '".$db->idate(dol_get_last_day($y, $m, false))."'";
@@ -270,92 +316,99 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 		$sql .= " AND (d.product_type = 0"; // Limit to products
 		$sql .= " AND d.date_start is null AND d.date_end IS NULL)"; // enhance detection of products
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.".$total_tva." <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.".$db->sanitize($total_tva)." <> 0)";
 		}
-		$sql .= " ORDER BY d.rowid, d.".$fk_facture.", pf.rowid";
+		$sql .= " ORDER BY d.rowid, d.".$db->sanitize($fk_facture).", pf.rowid";
 	}
 
-	if (!$sql) {
-		return -1;
-	}
-	if ($sql == 'TODO') {
-		return -2;
-	}
-	if ($sql != 'TODO') {
-		dol_syslog("Tax.lib.php::tax_by_thirdparty", LOG_DEBUG);
+	dol_syslog("Tax.lib.php::tax_by_thirdparty", LOG_DEBUG);
 
-		$resql = $db->query($sql);
-		if ($resql) {
-			$company_id = -1;
-			$oldrowid = '';
-			while ($assoc = $db->fetch_array($resql)) {
-				if (!isset($list[$assoc['company_id']]['totalht'])) {
-					$list[$assoc['company_id']]['totalht'] = 0;
+	$resql = $db->query($sql);
+	if ($resql) {
+		$company_id = -1;
+		$oldrowid = '';
+		while ($assoc = $db->fetch_array($resql)) {
+			if ($direction == 'sell' && getDolGlobalInt('INVOICE_USE_SITUATION') == 1) {
+				require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
+				if ((int) $assoc['type'] == Facture::TYPE_SITUATION) {
+					$ratio = tax_get_situation_ratio($db, (int) $assoc['rowid']);
+					if ($ratio === false) {
+						return -3;
+					}
+					foreach (array('total_ht', 'total_vat', 'total_ttc', 'total_localtax1', 'total_localtax2') as $field) {
+						$assoc[$field] = (float) price2num((float) $assoc[$field] * $ratio, 'MT');
+					}
 				}
-				if (!isset($list[$assoc['company_id']]['vat'])) {
-					$list[$assoc['company_id']]['vat'] = 0;
-				}
-				if (!isset($list[$assoc['company_id']]['localtax1'])) {
-					$list[$assoc['company_id']]['localtax1'] = 0;
-				}
-				if (!isset($list[$assoc['company_id']]['localtax2'])) {
-					$list[$assoc['company_id']]['localtax2'] = 0;
-				}
-
-				if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
-					$oldrowid = $assoc['rowid'];
-					$list[$assoc['company_id']]['totalht']  += (float) $assoc['total_ht'];
-					$list[$assoc['company_id']]['vat']      += (float) $assoc['total_vat'];
-					$list[$assoc['company_id']]['localtax1']      += (float) $assoc['total_localtax1'];
-					$list[$assoc['company_id']]['localtax2']      += (float) $assoc['total_localtax2'];
-				}
-
-				$list[$assoc['company_id']]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
-				$list[$assoc['company_id']]['dtype'][] = (int) $assoc['dtype'];
-				$list[$assoc['company_id']]['datef'][] = $db->jdate($assoc['datef']);
-				$list[$assoc['company_id']]['datep'][] = $db->jdate($assoc['datep']);
-
-				$list[$assoc['company_id']]['company_name'][] = (string) $assoc['company_name'];
-				$list[$assoc['company_id']]['company_id'][] = (int) $assoc['company_id'];
-				$list[$assoc['company_id']]['company_alias'][] = (string) $assoc['company_alias'];
-				$list[$assoc['company_id']]['company_email'][] = (string) $assoc['company_email'];
-				$list[$assoc['company_id']]['company_tva_intra'][] = (string) $assoc['company_tva_intra'];
-				$list[$assoc['company_id']]['company_client'][] = (int) $assoc['company_client'];
-				$list[$assoc['company_id']]['company_fournisseur'][] = (int) $assoc['company_fournisseur'];
-				$list[$assoc['company_id']]['company_customer_code'][] = (string) $assoc['company_customer_code'];
-				$list[$assoc['company_id']]['company_supplier_code'][] = (string) $assoc['company_supplier_code'];
-				$list[$assoc['company_id']]['company_customer_accounting_code'][] = (string) $assoc['company_customer_accounting_code'];
-				$list[$assoc['company_id']]['company_supplier_accounting_code'][] = (string) $assoc['company_supplier_accounting_code'];
-				$list[$assoc['company_id']]['company_status'][] = (int) $assoc['company_status'];
-
-				$list[$assoc['company_id']]['drate'][] = $assoc['rate'];
-				$list[$assoc['company_id']]['ddate_start'][] = $db->jdate($assoc['date_start']);
-				$list[$assoc['company_id']]['ddate_end'][] = $db->jdate($assoc['date_end']);
-
-				$list[$assoc['company_id']]['facid'][] = (int) $assoc['facid'];
-				$list[$assoc['company_id']]['facnum'][] = (string) $assoc['facnum'];
-				$list[$assoc['company_id']]['type'][] = (int) $assoc['type'];
-				$list[$assoc['company_id']]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
-				$list[$assoc['company_id']]['descr'][] = (string) $assoc['descr'];
-
-				$list[$assoc['company_id']]['totalht_list'][] = (float) $assoc['total_ht'];
-				$list[$assoc['company_id']]['vat_list'][] = (float) $assoc['total_vat'];
-				$list[$assoc['company_id']]['localtax1_list'][] = (float) $assoc['total_localtax1'];
-				$list[$assoc['company_id']]['localtax2_list'][] = (float) $assoc['total_localtax2'];
-
-				$list[$assoc['company_id']]['pid'][] = (int) $assoc['pid'];
-				$list[$assoc['company_id']]['pref'][] = (string) $assoc['pref'];
-				$list[$assoc['company_id']]['ptype'][] = (int) $assoc['ptype'];
-
-				$list[$assoc['company_id']]['payment_id'][] = (int) $assoc['payment_id'];
-				$list[$assoc['company_id']]['payment_amount'][] = (float) $assoc['payment_amount'];
-
-				$company_id = $assoc['company_id'];
 			}
-		} else {
-			dol_print_error($db);
-			return -3;
+			if (!isset($list[$assoc['company_id']]['totalht'])) {
+				$list[$assoc['company_id']]['totalht'] = 0;
+			}
+			if (!isset($list[$assoc['company_id']]['vat'])) {
+				$list[$assoc['company_id']]['vat'] = 0;
+			}
+			if (!isset($list[$assoc['company_id']]['localtax1'])) {
+				$list[$assoc['company_id']]['localtax1'] = 0;
+			}
+			if (!isset($list[$assoc['company_id']]['localtax2'])) {
+				$list[$assoc['company_id']]['localtax2'] = 0;
+			}
+
+			if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
+				$oldrowid = $assoc['rowid'];
+				$list[$assoc['company_id']]['totalht']  += (float) $assoc['total_ht'];
+				$list[$assoc['company_id']]['vat']      += (float) $assoc['total_vat'];
+				$list[$assoc['company_id']]['localtax1']      += (float) $assoc['total_localtax1'];
+				$list[$assoc['company_id']]['localtax2']      += (float) $assoc['total_localtax2'];
+			}
+
+			$list[$assoc['company_id']]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
+			$list[$assoc['company_id']]['dtype'][] = (int) $assoc['dtype'];
+			$list[$assoc['company_id']]['datef'][] = $db->jdate($assoc['datef']);
+			$list[$assoc['company_id']]['datep'][] = $db->jdate($assoc['datep']);
+
+			$list[$assoc['company_id']]['company_name'][] = (string) $assoc['company_name'];
+			$list[$assoc['company_id']]['company_id'][] = (int) $assoc['company_id'];
+			$list[$assoc['company_id']]['company_alias'][] = (string) $assoc['company_alias'];
+			$list[$assoc['company_id']]['company_email'][] = (string) $assoc['company_email'];
+			$list[$assoc['company_id']]['company_tva_intra'][] = (string) $assoc['company_tva_intra'];
+			$list[$assoc['company_id']]['company_client'][] = (int) $assoc['company_client'];
+			$list[$assoc['company_id']]['company_fournisseur'][] = (int) $assoc['company_fournisseur'];
+			$list[$assoc['company_id']]['company_customer_code'][] = (string) $assoc['company_customer_code'];
+			$list[$assoc['company_id']]['company_supplier_code'][] = (string) $assoc['company_supplier_code'];
+			$list[$assoc['company_id']]['company_customer_accounting_code'][] = (string) $assoc['company_customer_accounting_code'];
+			$list[$assoc['company_id']]['company_supplier_accounting_code'][] = (string) $assoc['company_supplier_accounting_code'];
+			$list[$assoc['company_id']]['company_status'][] = (int) $assoc['company_status'];
+
+			$list[$assoc['company_id']]['drate'][] = $assoc['rate'];
+			$list[$assoc['company_id']]['ddate_start'][] = $db->jdate($assoc['date_start']);
+			$list[$assoc['company_id']]['ddate_end'][] = $db->jdate($assoc['date_end']);
+
+			$list[$assoc['company_id']]['facid'][] = (int) $assoc['facid'];
+			$list[$assoc['company_id']]['facnum'][] = (string) $assoc['facnum'];
+			$list[$assoc['company_id']]['type'][] = (int) $assoc['type'];
+			$list[$assoc['company_id']]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
+			$list[$assoc['company_id']]['descr'][] = (string) $assoc['descr'];
+
+			$list[$assoc['company_id']]['totalht_list'][] = (float) $assoc['total_ht'];
+			$list[$assoc['company_id']]['vat_list'][] = (float) $assoc['total_vat'];
+			$list[$assoc['company_id']]['localtax1_list'][] = (float) $assoc['total_localtax1'];
+			$list[$assoc['company_id']]['localtax2_list'][] = (float) $assoc['total_localtax2'];
+
+			$list[$assoc['company_id']]['pid'][] = (int) $assoc['pid'];
+			$list[$assoc['company_id']]['pref'][] = (string) $assoc['pref'];
+			$list[$assoc['company_id']]['ptype'][] = (int) $assoc['ptype'];
+			$list[$assoc['company_id']]['pstatus'][] = (int) $assoc['pstatus'];
+			$list[$assoc['company_id']]['pstatusbuy'][] = (int) $assoc['pstatusbuy'];
+
+			$list[$assoc['company_id']]['payment_id'][] = (int) $assoc['payment_id'];
+			$list[$assoc['company_id']]['payment_ref'][] = (string) $assoc['payment_ref'];
+			$list[$assoc['company_id']]['payment_amount'][] = (float) $assoc['payment_amount'];
+
+			$company_id = $assoc['company_id'];
 		}
+	} else {
+		dol_print_error($db);
+		return -3;
 	}
 
 
@@ -366,19 +419,22 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 	if (($direction == 'sell' && getDolGlobalString('TAX_MODE_SELL_SERVICE') == 'invoice')
 		|| ($direction == 'buy' && getDolGlobalString('TAX_MODE_BUY_SERVICE') == 'invoice')) {
 		// Count on invoice date
-		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$fk_facture." as facid, d.$f_rate as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$total_tva." as total_vat, d.description as descr,";
-		$sql .= " d.".$total_localtax1." as total_localtax1, d.".$total_localtax2." as total_localtax2, ";
+		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$db->sanitize($fk_facture)." as facid, d.".$db->sanitize($f_rate)." as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$db->sanitize($total_tva)." as total_vat, d.description as descr,";
+		$sql .= " d.".$db->sanitize($total_localtax1)." as total_localtax1, d.".$db->sanitize($total_localtax2)." as total_localtax2, ";
 		$sql .= " d.date_start as date_start, d.date_end as date_end,";
-		$sql .= " f.".$invoicefieldref." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
+		$sql .= " f.".$db->sanitize($invoicefieldref)." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
 		$sql .= " s.nom as company_name, s.name_alias as company_alias, s.rowid as company_id, s.client as company_client, s.fournisseur as company_fournisseur, s.email as company_email,";
 		$sql .= " s.code_client as company_customer_code, s.code_fournisseur as company_supplier_code,";
 		$sql .= " s.code_compta as company_customer_accounting_code, s.code_compta_fournisseur as company_supplier_accounting_code,";
 		$sql .= " s.status as company_status, s.tva_intra as company_tva_intra,";
 		$sql .= " p.rowid as pid, p.ref as pref, p.fk_product_type as ptype, p.tosell as pstatus, p.tobuy as pstatusbuy,";
 		$sql .= " 0 as payment_id, '' as payment_ref, 0 as payment_amount";
-		$sql .= " FROM ".MAIN_DB_PREFIX.$invoicetable." as f,";
+		if ($direction == 'sell' && getDolGlobalInt('INVOICE_USE_SITUATION') == 1) {
+			$sql .= ", '' as datep";
+		}
+		$sql .= " FROM ".MAIN_DB_PREFIX.$db->sanitize($invoicetable)." as f,";
 		$sql .= " ".MAIN_DB_PREFIX."societe as s,";
-		$sql .= " ".MAIN_DB_PREFIX.$invoicedettable." as d";
+		$sql .= " ".MAIN_DB_PREFIX.$db->sanitize($invoicedettable)." as d";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."product as p on d.fk_product = p.rowid";
 		$sql .= " WHERE f.entity IN (".getEntity($invoicetable).")";
 		$sql .= " AND f.fk_statut in (1,2)"; // Validated or paid (partially or completely)
@@ -395,7 +451,7 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 				$sql .= " AND f.type IN (0,1,2,3,5)";
 			}
 		}
-		$sql .= " AND f.rowid = d.".$fk_facture;
+		$sql .= " AND f.rowid = d.".$db->sanitize($fk_facture);
 		$sql .= " AND s.rowid = f.fk_soc";
 		if ($y && $m) {
 			$sql .= " AND f.datef >= '".$db->idate(dol_get_first_day($y, $m, false))."'";
@@ -414,35 +470,35 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 		$sql .= " AND (d.product_type = 1"; // Limit to services
 		$sql .= " OR d.date_start is NOT null OR d.date_end IS NOT NULL)"; // enhance detection of service
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.".$total_tva." <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.".$db->sanitize($total_tva)." <> 0)";
 		}
-		$sql .= " ORDER BY d.rowid, d.".$fk_facture;
+		$sql .= " ORDER BY d.rowid, d.".$db->sanitize($fk_facture);
 	} else {
 		// Count on payments date
-		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$fk_facture." as facid, d.$f_rate as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$total_tva." as total_vat, d.description as descr,";
-		$sql .= " d.".$total_localtax1." as total_localtax1, d.".$total_localtax2." as total_localtax2, ";
+		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$db->sanitize($fk_facture)." as facid, d.".$db->sanitize($f_rate)." as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$db->sanitize($total_tva)." as total_vat, d.description as descr,";
+		$sql .= " d.".$db->sanitize($total_localtax1)." as total_localtax1, d.".$db->sanitize($total_localtax2)." as total_localtax2, ";
 		$sql .= " d.date_start as date_start, d.date_end as date_end,";
-		$sql .= " f.".$invoicefieldref." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
+		$sql .= " f.".$db->sanitize($invoicefieldref)." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
 		$sql .= " s.nom as company_name, s.name_alias as company_alias, s.rowid as company_id, s.client as company_client, s.fournisseur as company_fournisseur, s.email as company_email,";
 		$sql .= " s.code_client as company_customer_code, s.code_fournisseur as company_supplier_code,";
 		$sql .= " s.code_compta as company_customer_accounting_code, s.code_compta_fournisseur as company_supplier_accounting_code,";
 		$sql .= " s.status as company_status, s.tva_intra as company_tva_intra,";
 		$sql .= " p.rowid as pid, p.ref as pref, p.fk_product_type as ptype, p.tosell as pstatus, p.tobuy as pstatusbuy,";
-		$sql .= " pf.".$fk_payment." as payment_id, pf.amount as payment_amount,";
+		$sql .= " pf.".$db->sanitize($fk_payment)." as payment_id, pf.amount as payment_amount,";
 		$sql .= " pa.datep as datep, pa.ref as payment_ref";
-		$sql .= " FROM ".MAIN_DB_PREFIX.$invoicetable." as f,";
-		$sql .= " ".MAIN_DB_PREFIX.$paymentfacturetable." as pf,";
-		$sql .= " ".MAIN_DB_PREFIX.$paymenttable." as pa,";
+		$sql .= " FROM ".MAIN_DB_PREFIX.$db->sanitize($invoicetable)." as f,";
+		$sql .= " ".MAIN_DB_PREFIX.$db->sanitize($paymentfacturetable)." as pf,";
+		$sql .= " ".MAIN_DB_PREFIX.$db->sanitize($paymenttable)." as pa,";
 		$sql .= " ".MAIN_DB_PREFIX."societe as s,";
-		$sql .= " ".MAIN_DB_PREFIX.$invoicedettable." as d";
+		$sql .= " ".MAIN_DB_PREFIX.$db->sanitize($invoicedettable)." as d";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."product as p on d.fk_product = p.rowid";
 		$sql .= " WHERE f.entity IN (".getEntity($invoicetable).")";
 		$sql .= " AND f.fk_statut in (1,2)"; // Paid (partially or completely)
 		$sql .= " AND f.type IN (0,1,2,3,5)";
-		$sql .= " AND f.rowid = d.".$fk_facture;
+		$sql .= " AND f.rowid = d.".$db->sanitize($fk_facture);
 		$sql .= " AND s.rowid = f.fk_soc";
-		$sql .= " AND pf.".$fk_facture2." = f.rowid";
-		$sql .= " AND pa.rowid = pf.".$fk_payment;
+		$sql .= " AND pf.".$db->sanitize($fk_facture2)." = f.rowid";
+		$sql .= " AND pa.rowid = pf.".$db->sanitize($fk_payment);
 		if ($y && $m) {
 			$sql .= " AND pa.datep >= '".$db->idate(dol_get_first_day($y, $m, false))."'";
 			$sql .= " AND pa.datep <= '".$db->idate(dol_get_last_day($y, $m, false))."'";
@@ -460,92 +516,97 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 		$sql .= " AND (d.product_type = 1"; // Limit to services
 		$sql .= " OR d.date_start is NOT null OR d.date_end IS NOT NULL)"; // enhance detection of service
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.".$total_tva." <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.".$db->sanitize($total_tva)." <> 0)";
 		}
-		$sql .= " ORDER BY d.rowid, d.".$fk_facture.", pf.rowid";
+		$sql .= " ORDER BY d.rowid, d.".$db->sanitize($fk_facture).", pf.rowid";
 	}
 
-	if (!$sql) {
-		dol_syslog("Tax.lib.php::tax_by_thirdparty no accountancy module enabled".$sql, LOG_ERR);
-		return -1; // -1 = Not accountancy module enabled
-	}
-	if ($sql == 'TODO') {
-		return -2; // -2 = Feature not yet available
-	}
-	if ($sql != 'TODO') {
-		dol_syslog("Tax.lib.php::tax_by_thirdparty", LOG_DEBUG);
-		$resql = $db->query($sql);
-		if ($resql) {
-			$company_id = -1;
-			$oldrowid = '';
-			while ($assoc = $db->fetch_array($resql)) {
-				if (!isset($list[$assoc['company_id']]['totalht'])) {
-					$list[$assoc['company_id']]['totalht'] = 0;
+	dol_syslog("Tax.lib.php::tax_by_thirdparty", LOG_DEBUG);
+	$resql = $db->query($sql);
+	if ($resql) {
+		$company_id = -1;
+		$oldrowid = '';
+		while ($assoc = $db->fetch_array($resql)) {
+			if ($direction == 'sell' && getDolGlobalInt('INVOICE_USE_SITUATION') == 1) {
+				require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
+				if ((int) $assoc['type'] == Facture::TYPE_SITUATION) {
+					$ratio = tax_get_situation_ratio($db, (int) $assoc['rowid']);
+					if ($ratio === false) {
+						return -3;
+					}
+					foreach (array('total_ht', 'total_vat', 'total_ttc', 'total_localtax1', 'total_localtax2') as $field) {
+						$assoc[$field] = (float) price2num((float) $assoc[$field] * $ratio, 'MT');
+					}
 				}
-				if (!isset($list[$assoc['company_id']]['vat'])) {
-					$list[$assoc['company_id']]['vat'] = 0;
-				}
-				if (!isset($list[$assoc['company_id']]['localtax1'])) {
-					$list[$assoc['company_id']]['localtax1'] = 0;
-				}
-				if (!isset($list[$assoc['company_id']]['localtax2'])) {
-					$list[$assoc['company_id']]['localtax2'] = 0;
-				}
-
-				if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
-					$oldrowid = $assoc['rowid'];
-					$list[$assoc['company_id']]['totalht']  += (float) $assoc['total_ht'];
-					$list[$assoc['company_id']]['vat']      += (float) $assoc['total_vat'];
-					$list[$assoc['company_id']]['localtax1']	 += (float) $assoc['total_localtax1'];
-					$list[$assoc['company_id']]['localtax2']	 += (float) $assoc['total_localtax2'];
-				}
-				$list[$assoc['company_id']]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
-				$list[$assoc['company_id']]['dtype'][] = $assoc['dtype'];
-				$list[$assoc['company_id']]['datef'][] = $db->jdate($assoc['datef']);
-				$list[$assoc['company_id']]['datep'][] = $db->jdate($assoc['datep']);
-
-				$list[$assoc['company_id']]['company_name'][] = (string) $assoc['company_name'];
-				$list[$assoc['company_id']]['company_id'][] = (int) $assoc['company_id'];
-				$list[$assoc['company_id']]['company_alias'][] = (string) $assoc['company_alias'];
-				$list[$assoc['company_id']]['company_email'][] = (string) $assoc['company_email'];
-				$list[$assoc['company_id']]['company_tva_intra'][] = (string) $assoc['company_tva_intra'];
-				$list[$assoc['company_id']]['company_client'][] = (int) $assoc['company_client'];
-				$list[$assoc['company_id']]['company_fournisseur'][] = (int) $assoc['company_fournisseur'];
-				$list[$assoc['company_id']]['company_customer_code'][] = (string) $assoc['company_customer_code'];
-				$list[$assoc['company_id']]['company_supplier_code'][] = (string) $assoc['company_supplier_code'];
-				$list[$assoc['company_id']]['company_customer_accounting_code'][] = (string) $assoc['company_customer_accounting_code'];
-				$list[$assoc['company_id']]['company_supplier_accounting_code'][] = (string) $assoc['company_supplier_accounting_code'];
-				$list[$assoc['company_id']]['company_status'][] = (int) $assoc['company_status'];
-
-				$list[$assoc['company_id']]['drate'][] = $assoc['rate'];
-				$list[$assoc['company_id']]['ddate_start'][] = $db->jdate($assoc['date_start']);
-				$list[$assoc['company_id']]['ddate_end'][] = $db->jdate($assoc['date_end']);
-
-				$list[$assoc['company_id']]['facid'][] = (int) $assoc['facid'];
-				$list[$assoc['company_id']]['facnum'][] = (string) $assoc['facnum'];
-				$list[$assoc['company_id']]['type'][] = (int) $assoc['type'];
-				$list[$assoc['company_id']]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
-				$list[$assoc['company_id']]['descr'][] = (string) $assoc['descr'];
-
-				$list[$assoc['company_id']]['totalht_list'][] = (float) $assoc['total_ht'];
-				$list[$assoc['company_id']]['vat_list'][] = (float) $assoc['total_vat'];
-				$list[$assoc['company_id']]['localtax1_list'][] = (float) $assoc['total_localtax1'];
-				$list[$assoc['company_id']]['localtax2_list'][] = (float) $assoc['total_localtax2'];
-
-				$list[$assoc['company_id']]['pid'][] = (int) $assoc['pid'];
-				$list[$assoc['company_id']]['pref'][] = (string) $assoc['pref'];
-				$list[$assoc['company_id']]['ptype'][] = (int) $assoc['ptype'];
-
-				$list[$assoc['company_id']]['payment_id'][] = (int) $assoc['payment_id'];
-				$list[$assoc['company_id']]['payment_ref'][] = (string) $assoc['payment_ref'];
-				$list[$assoc['company_id']]['payment_amount'][] = (float) $assoc['payment_amount'];
-
-				$company_id = $assoc['company_id'];
 			}
-		} else {
-			dol_print_error($db);
-			return -3;
+			if (!isset($list[$assoc['company_id']]['totalht'])) {
+				$list[$assoc['company_id']]['totalht'] = 0;
+			}
+			if (!isset($list[$assoc['company_id']]['vat'])) {
+				$list[$assoc['company_id']]['vat'] = 0;
+			}
+			if (!isset($list[$assoc['company_id']]['localtax1'])) {
+				$list[$assoc['company_id']]['localtax1'] = 0;
+			}
+			if (!isset($list[$assoc['company_id']]['localtax2'])) {
+				$list[$assoc['company_id']]['localtax2'] = 0;
+			}
+
+			if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
+				$oldrowid = $assoc['rowid'];
+				$list[$assoc['company_id']]['totalht'] += (float) $assoc['total_ht'];
+				$list[$assoc['company_id']]['vat'] += (float) $assoc['total_vat'];
+				$list[$assoc['company_id']]['localtax1'] += (float) $assoc['total_localtax1'];
+				$list[$assoc['company_id']]['localtax2'] += (float) $assoc['total_localtax2'];
+			}
+			$list[$assoc['company_id']]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
+			$list[$assoc['company_id']]['dtype'][] = $assoc['dtype'];
+			$list[$assoc['company_id']]['datef'][] = $db->jdate($assoc['datef']);
+			$list[$assoc['company_id']]['datep'][] = $db->jdate($assoc['datep']);
+
+			$list[$assoc['company_id']]['company_name'][] = (string) $assoc['company_name'];
+			$list[$assoc['company_id']]['company_id'][] = (int) $assoc['company_id'];
+			$list[$assoc['company_id']]['company_alias'][] = (string) $assoc['company_alias'];
+			$list[$assoc['company_id']]['company_email'][] = (string) $assoc['company_email'];
+			$list[$assoc['company_id']]['company_tva_intra'][] = (string) $assoc['company_tva_intra'];
+			$list[$assoc['company_id']]['company_client'][] = (int) $assoc['company_client'];
+			$list[$assoc['company_id']]['company_fournisseur'][] = (int) $assoc['company_fournisseur'];
+			$list[$assoc['company_id']]['company_customer_code'][] = (string) $assoc['company_customer_code'];
+			$list[$assoc['company_id']]['company_supplier_code'][] = (string) $assoc['company_supplier_code'];
+			$list[$assoc['company_id']]['company_customer_accounting_code'][] = (string) $assoc['company_customer_accounting_code'];
+			$list[$assoc['company_id']]['company_supplier_accounting_code'][] = (string) $assoc['company_supplier_accounting_code'];
+			$list[$assoc['company_id']]['company_status'][] = (int) $assoc['company_status'];
+
+			$list[$assoc['company_id']]['drate'][] = $assoc['rate'];
+			$list[$assoc['company_id']]['ddate_start'][] = $db->jdate($assoc['date_start']);
+			$list[$assoc['company_id']]['ddate_end'][] = $db->jdate($assoc['date_end']);
+
+			$list[$assoc['company_id']]['facid'][] = (int) $assoc['facid'];
+			$list[$assoc['company_id']]['facnum'][] = (string) $assoc['facnum'];
+			$list[$assoc['company_id']]['type'][] = (int) $assoc['type'];
+			$list[$assoc['company_id']]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
+			$list[$assoc['company_id']]['descr'][] = (string) $assoc['descr'];
+
+			$list[$assoc['company_id']]['totalht_list'][] = (float) $assoc['total_ht'];
+			$list[$assoc['company_id']]['vat_list'][] = (float) $assoc['total_vat'];
+			$list[$assoc['company_id']]['localtax1_list'][] = (float) $assoc['total_localtax1'];
+			$list[$assoc['company_id']]['localtax2_list'][] = (float) $assoc['total_localtax2'];
+
+			$list[$assoc['company_id']]['pid'][] = (int) $assoc['pid'];
+			$list[$assoc['company_id']]['pref'][] = (string) $assoc['pref'];
+			$list[$assoc['company_id']]['ptype'][] = (int) $assoc['ptype'];
+			$list[$assoc['company_id']]['pstatus'][] = (int) $assoc['pstatus'];
+			$list[$assoc['company_id']]['pstatusbuy'][] = (int) $assoc['pstatusbuy'];
+
+			$list[$assoc['company_id']]['payment_id'][] = (int) $assoc['payment_id'];
+			$list[$assoc['company_id']]['payment_ref'][] = (string) $assoc['payment_ref'];
+			$list[$assoc['company_id']]['payment_amount'][] = (float) $assoc['payment_amount'];
+
+			$company_id = $assoc['company_id'];
 		}
+	} else {
+		dol_print_error($db);
+		return -3;
 	}
 
 
@@ -556,7 +617,7 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 		$sql = '';
 
 		// Count on payments date
-		$sql = "SELECT d.rowid, d.product_type as dtype, e.rowid as facid, d.$f_rate as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.total_tva as total_vat, e.note_private as descr,";
+		$sql = "SELECT d.rowid, d.product_type as dtype, e.rowid as facid, d.".$db->sanitize($f_rate)." as rate, d.total_ht as total_ht, d.total_ttc as total_ttc, d.total_tva as total_vat, e.note_private as descr,";
 		$sql .= " d.total_localtax1 as total_localtax1, d.total_localtax2 as total_localtax2, ";
 		$sql .= " e.date_debut as date_start, e.date_fin as date_end, e.fk_user_author,";
 		$sql .= " e.ref as facnum, e.total_ttc as ftotal_ttc, e.date_create, d.fk_c_type_fees as type,";
@@ -564,7 +625,7 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 		$sql .= " FROM ".MAIN_DB_PREFIX."expensereport as e";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."expensereport_det as d ON d.fk_expensereport = e.rowid ";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."payment_expensereport as p ON p.fk_expensereport = e.rowid ";
-		$sql .= " WHERE e.entity = ".$conf->entity;
+		$sql .= " WHERE e.entity = ".((int) $conf->entity);
 		$sql .= " AND e.fk_statut in (6)";
 		if ($y && $m) {
 			$sql .= " AND p.datep >= '".$db->idate(dol_get_first_day($y, $m, false))."'";
@@ -583,92 +644,83 @@ function tax_by_thirdparty($type, $db, $y, $date_start, $date_end, $modetax, $di
 		$sql .= " AND (d.product_type = -1";
 		$sql .= " OR e.date_debut is NOT null OR e.date_fin IS NOT NULL)"; // enhance detection of service
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.total_tva <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.total_tva <> 0)";
 		}
 		$sql .= " ORDER BY e.rowid";
 
-		if (!$sql) {
-			dol_syslog("Tax.lib.php::tax_by_thirdparty no accountancy module enabled".$sql, LOG_ERR);
-			return -1; // -1 = Not accountancy module enabled
-		}
-		if ($sql == 'TODO') {
-			return -2; // -2 = Feature not yet available
-		}
-		if ($sql != 'TODO') {
-			dol_syslog("Tax.lib.php::tax_by_thirdparty", LOG_DEBUG);
-			$resql = $db->query($sql);
-			if ($resql) {
-				$company_id = -1;
-				$oldrowid = '';
-				while ($assoc = $db->fetch_array($resql)) {
-					if (!isset($list[$assoc['company_id']]['totalht'])) {
-						$list[$assoc['company_id']]['totalht'] = 0;
-					}
-					if (!isset($list[$assoc['company_id']]['vat'])) {
-						$list[$assoc['company_id']]['vat'] = 0;
-					}
-					if (!isset($list[$assoc['company_id']]['localtax1'])) {
-						$list[$assoc['company_id']]['localtax1'] = 0;
-					}
-					if (!isset($list[$assoc['company_id']]['localtax2'])) {
-						$list[$assoc['company_id']]['localtax2'] = 0;
-					}
-
-					if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
-						$oldrowid = $assoc['rowid'];
-						$list[$assoc['company_id']]['totalht'] += (float) $assoc['total_ht'];
-						$list[$assoc['company_id']]['vat'] += (float) $assoc['total_vat'];
-						$list[$assoc['company_id']]['localtax1']	 += (float) $assoc['total_localtax1'];
-						$list[$assoc['company_id']]['localtax2']	 += (float) $assoc['total_localtax2'];
-					}
-
-					$list[$assoc['company_id']]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
-					$list[$assoc['company_id']]['dtype'][] = 'ExpenseReportPayment';
-					$list[$assoc['company_id']]['datef'][] = (int) $assoc['datef'];
-
-					$list[$assoc['company_id']]['company_name'][] = '';
-					$list[$assoc['company_id']]['company_id'][] = 0;
-					$list[$assoc['company_id']]['company_alias'][] = '';
-					$list[$assoc['company_id']]['company_email'][] = '';
-					$list[$assoc['company_id']]['company_tva_intra'][] = '';
-					$list[$assoc['company_id']]['company_client'][] = 0;
-					$list[$assoc['company_id']]['company_fournisseur'][] = 0;
-					$list[$assoc['company_id']]['company_customer_code'][] = '';
-					$list[$assoc['company_id']]['company_supplier_code'][] = '';
-					$list[$assoc['company_id']]['company_customer_accounting_code'][] = '';
-					$list[$assoc['company_id']]['company_supplier_accounting_code'][] = '';
-					$list[$assoc['company_id']]['company_status'][] = 0;
-
-					$list[$assoc['company_id']]['user_id'][] = (int) $assoc['fk_user_author'];
-					$list[$assoc['company_id']]['drate'][] = $assoc['rate'];
-					$list[$assoc['company_id']]['ddate_start'][] = $db->jdate($assoc['date_start']);
-					$list[$assoc['company_id']]['ddate_end'][] = $db->jdate($assoc['date_end']);
-
-					$list[$assoc['company_id']]['facid'][] = (int) $assoc['facid'];
-					$list[$assoc['company_id']]['facnum'][] = (string) $assoc['facnum'];
-					$list[$assoc['company_id']]['type'][] = (int) $assoc['type'];
-					$list[$assoc['company_id']]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
-					$list[$assoc['company_id']]['descr'][] = (string) $assoc['descr'];
-
-					$list[$assoc['company_id']]['totalht_list'][] = (float) $assoc['total_ht'];
-					$list[$assoc['company_id']]['vat_list'][] = (float) $assoc['total_vat'];
-					$list[$assoc['company_id']]['localtax1_list'][] = (float) $assoc['total_localtax1'];
-					$list[$assoc['company_id']]['localtax2_list'][] = (float) $assoc['total_localtax2'];
-
-					$list[$assoc['company_id']]['pid'][] = (int) $assoc['pid'];
-					$list[$assoc['company_id']]['pref'][] = (string) $assoc['pref'];
-					$list[$assoc['company_id']]['ptype'][] = 'ExpenseReportPayment';
-
-					$list[$assoc['company_id']]['payment_id'][] = (int) $assoc['payment_id'];
-					$list[$assoc['company_id']]['payment_ref'][] = (string) $assoc['payment_ref'];
-					$list[$assoc['company_id']]['payment_amount'][] = (float) $assoc['payment_amount'];
-
-					$company_id = $assoc['company_id'];
+		dol_syslog("Tax.lib.php::tax_by_thirdparty", LOG_DEBUG);
+		$resql = $db->query($sql);
+		if ($resql) {
+			$company_id = -1;
+			$oldrowid = '';
+			while ($assoc = $db->fetch_array($resql)) {
+				if (!isset($list[$assoc['company_id']]['totalht'])) {
+					$list[$assoc['company_id']]['totalht'] = 0;
 				}
-			} else {
-				dol_print_error($db);
-				return -3;
+				if (!isset($list[$assoc['company_id']]['vat'])) {
+					$list[$assoc['company_id']]['vat'] = 0;
+				}
+				if (!isset($list[$assoc['company_id']]['localtax1'])) {
+					$list[$assoc['company_id']]['localtax1'] = 0;
+				}
+				if (!isset($list[$assoc['company_id']]['localtax2'])) {
+					$list[$assoc['company_id']]['localtax2'] = 0;
+				}
+
+				if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
+					$oldrowid = $assoc['rowid'];
+					$list[$assoc['company_id']]['totalht'] += (float) $assoc['total_ht'];
+					$list[$assoc['company_id']]['vat'] += (float) $assoc['total_vat'];
+					$list[$assoc['company_id']]['localtax1'] += (float) $assoc['total_localtax1'];
+					$list[$assoc['company_id']]['localtax2'] += (float) $assoc['total_localtax2'];
+				}
+
+				$list[$assoc['company_id']]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
+				$list[$assoc['company_id']]['dtype'][] = 'ExpenseReportPayment';
+				$list[$assoc['company_id']]['datef'][] = (int) $assoc['datef'];
+
+				$list[$assoc['company_id']]['company_name'][] = '';
+				$list[$assoc['company_id']]['company_id'][] = 0;
+				$list[$assoc['company_id']]['company_alias'][] = '';
+				$list[$assoc['company_id']]['company_email'][] = '';
+				$list[$assoc['company_id']]['company_tva_intra'][] = '';
+				$list[$assoc['company_id']]['company_client'][] = 0;
+				$list[$assoc['company_id']]['company_fournisseur'][] = 0;
+				$list[$assoc['company_id']]['company_customer_code'][] = '';
+				$list[$assoc['company_id']]['company_supplier_code'][] = '';
+				$list[$assoc['company_id']]['company_customer_accounting_code'][] = '';
+				$list[$assoc['company_id']]['company_supplier_accounting_code'][] = '';
+				$list[$assoc['company_id']]['company_status'][] = 0;
+
+				$list[$assoc['company_id']]['user_id'][] = (int) $assoc['fk_user_author'];
+				$list[$assoc['company_id']]['drate'][] = $assoc['rate'];
+				$list[$assoc['company_id']]['ddate_start'][] = $db->jdate($assoc['date_start']);
+				$list[$assoc['company_id']]['ddate_end'][] = $db->jdate($assoc['date_end']);
+
+				$list[$assoc['company_id']]['facid'][] = (int) $assoc['facid'];
+				$list[$assoc['company_id']]['facnum'][] = (string) $assoc['facnum'];
+				$list[$assoc['company_id']]['type'][] = (int) $assoc['type'];
+				$list[$assoc['company_id']]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
+				$list[$assoc['company_id']]['descr'][] = (string) $assoc['descr'];
+
+				$list[$assoc['company_id']]['totalht_list'][] = (float) $assoc['total_ht'];
+				$list[$assoc['company_id']]['vat_list'][] = (float) $assoc['total_vat'];
+				$list[$assoc['company_id']]['localtax1_list'][] = (float) $assoc['total_localtax1'];
+				$list[$assoc['company_id']]['localtax2_list'][] = (float) $assoc['total_localtax2'];
+
+				$list[$assoc['company_id']]['pid'][] = (int) $assoc['pid'];
+				$list[$assoc['company_id']]['pref'][] = (string) $assoc['pref'];
+				$list[$assoc['company_id']]['ptype'][] = 'ExpenseReportPayment';
+
+				$list[$assoc['company_id']]['payment_id'][] = (int) $assoc['payment_id'];
+				$list[$assoc['company_id']]['payment_ref'][] = (string) $assoc['payment_ref'];
+				$list[$assoc['company_id']]['payment_amount'][] = (float) $assoc['payment_amount'];
+
+				$company_id = $assoc['company_id'];
 			}
+		} else {
+			dol_print_error($db);
+			return -3;
 		}
 	}
 
@@ -742,10 +794,10 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 	if (($direction == 'sell' && getDolGlobalString('TAX_MODE_SELL_PRODUCT') == 'invoice')
 		|| ($direction == 'buy' && getDolGlobalString('TAX_MODE_BUY_PRODUCT') == 'invoice')) {
 		// Count on delivery date (use invoice date as delivery is unknown)
-		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$fk_facture." as facid, d.$f_rate as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$total_tva." as total_vat, d.description as descr,";
-		$sql .= " d.".$total_localtax1." as total_localtax1, d.".$total_localtax2." as total_localtax2, ";
+		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$db->sanitize($fk_facture)." as facid, d.".$db->sanitize($f_rate)." as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$db->sanitize($total_tva)." as total_vat, d.description as descr,";
+		$sql .= " d.".$db->sanitize($total_localtax1)." as total_localtax1, d.".$db->sanitize($total_localtax2)." as total_localtax2, ";
 		$sql .= " d.date_start as date_start, d.date_end as date_end,";
-		$sql .= " f.".$invoicefieldref." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
+		$sql .= " f.".$db->sanitize($invoicefieldref)." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
 		$sql .= " s.nom as company_name, s.name_alias as company_alias, s.rowid as company_id, s.client as company_client, s.fournisseur as company_fournisseur, s.email as company_email,";
 		$sql .= " s.code_client as company_customer_code, s.code_fournisseur as company_supplier_code,";
 		$sql .= " s.code_compta as company_customer_accounting_code, s.code_compta_fournisseur as company_supplier_accounting_code,";
@@ -753,9 +805,9 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 		$sql .= " p.rowid as pid, p.ref as pref, p.fk_product_type as ptype,";
 		$sql .= " 0 as payment_id, '' as payment_ref, 0 as payment_amount,";
 		$sql .= " '' as datep";
-		$sql .= " FROM ".MAIN_DB_PREFIX.$invoicetable." as f";
+		$sql .= " FROM ".MAIN_DB_PREFIX.$db->sanitize($invoicetable)." as f";
 		$sql .= " INNER JOIN ".MAIN_DB_PREFIX."societe as s ON s.rowid = f.fk_soc";
-		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$invoicedettable." as d ON d.".$fk_facture."=f.rowid";
+		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$db->sanitize($invoicedettable)." as d ON d.".$db->sanitize($fk_facture)." = f.rowid";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."product as p on d.fk_product = p.rowid";
 		$sql .= " WHERE f.entity IN (".getEntity($invoicetable).")";
 		$sql .= " AND f.fk_statut in (1,2)"; // Validated or paid (partially or completely)
@@ -789,27 +841,27 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 		$sql .= " AND (d.product_type = 0"; // Limit to products
 		$sql .= " AND d.date_start is null AND d.date_end IS NULL)"; // enhance detection of products
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.".$total_tva." <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.".$db->sanitize($total_tva)." <> 0)";
 		}
-		$sql .= " ORDER BY d.rowid, d.".$fk_facture;
+		$sql .= " ORDER BY d.rowid, d.".$db->sanitize($fk_facture);
 	} else {
 		// Count on payments date
-		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$fk_facture." as facid, d.$f_rate as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$total_tva." as total_vat, d.description as descr,";
-		$sql .= " d.".$total_localtax1." as total_localtax1, d.".$total_localtax2." as total_localtax2, ";
+		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$db->sanitize($fk_facture)." as facid, d.".$db->sanitize($f_rate)." as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$db->sanitize($total_tva)." as total_vat, d.description as descr,";
+		$sql .= " d.".$db->sanitize($total_localtax1)." as total_localtax1, d.".$db->sanitize($total_localtax2)." as total_localtax2, ";
 		$sql .= " d.date_start as date_start, d.date_end as date_end,";
-		$sql .= " f.".$invoicefieldref." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
+		$sql .= " f.".$db->sanitize($invoicefieldref)." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
 		$sql .= " s.nom as company_name, s.name_alias as company_alias, s.rowid as company_id, s.client as company_client, s.fournisseur as company_fournisseur, s.email as company_email,";
 		$sql .= " s.code_client as company_customer_code, s.code_fournisseur as company_supplier_code,";
 		$sql .= " s.code_compta as company_customer_accounting_code, s.code_compta_fournisseur as company_supplier_accounting_code,";
 		$sql .= " s.status as company_status, s.tva_intra as company_tva_intra,";
 		$sql .= " p.rowid as pid, p.ref as pref, p.fk_product_type as ptype,";
-		$sql .= " pf.".$fk_payment." as payment_id, pf.amount as payment_amount,";
+		$sql .= " pf.".$db->sanitize($fk_payment)." as payment_id, pf.amount as payment_amount,";
 		$sql .= " pa.datep as datep, pa.ref as payment_ref";
-		$sql .= " FROM ".MAIN_DB_PREFIX.$invoicetable." as f";
-		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$paymentfacturetable." as pf ON pf.".$fk_facture2." = f.rowid";
-		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$paymenttable." as pa ON pa.rowid = pf.".$fk_payment;
+		$sql .= " FROM ".MAIN_DB_PREFIX.$db->sanitize($invoicetable)." as f";
+		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$db->sanitize($paymentfacturetable)." as pf ON pf.".$db->sanitize($fk_facture2)." = f.rowid";
+		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$db->sanitize($paymenttable)." as pa ON pa.rowid = pf.".$db->sanitize($fk_payment);
 		$sql .= " INNER JOIN ".MAIN_DB_PREFIX."societe as s ON s.rowid = f.fk_soc";
-		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$invoicedettable." as d ON d.".$fk_facture." = f.rowid";
+		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$db->sanitize($invoicedettable)." as d ON d.".$db->sanitize($fk_facture)." = f.rowid";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."product as p on d.fk_product = p.rowid";
 		$sql .= " WHERE f.entity IN (".getEntity($invoicetable).")";
 		$sql .= " AND f.fk_statut in (1,2)"; // Paid (partially or completely)
@@ -831,99 +883,102 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 		$sql .= " AND (d.product_type = 0"; // Limit to products
 		$sql .= " AND d.date_start is null AND d.date_end IS NULL)"; // enhance detection of products
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.".$total_tva." <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.".$db->sanitize($total_tva)." <> 0)";
 		}
-		$sql .= " ORDER BY d.rowid, d.".$fk_facture.", pf.rowid";
+		$sql .= " ORDER BY d.rowid, d.".$db->sanitize($fk_facture).", pf.rowid";
 	}
 
-	if (!$sql) {
-		return -1;
-	}
-	if ($sql == 'TODO') {
-		return -2;
-	}
-	if ($sql != 'TODO') {
-		dol_syslog("Tax.lib.php::tax_by_rate", LOG_DEBUG);
+	dol_syslog("Tax.lib.php::tax_by_rate", LOG_DEBUG);
 
-		$resql = $db->query($sql);
-		if ($resql) {
-			$rate = -1;
-			$oldrowid = '';
-			while ($assoc = $db->fetch_array($resql)) {
-				$rate_key = $assoc['rate'];
-				if ($f_rate == 'tva_tx' && !empty($assoc['vat_src_code']) && !preg_match('/\(/', $rate_key)) {
-					$rate_key .= ' (' . $assoc['vat_src_code'] . ')';
+	$resql = $db->query($sql);
+	if ($resql) {
+		$rate = -1;
+		$oldrowid = '';
+		while ($assoc = $db->fetch_array($resql)) {
+			if ($direction == 'sell' && getDolGlobalInt('INVOICE_USE_SITUATION') == 1) {
+				require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
+				if ((int) $assoc['type'] == Facture::TYPE_SITUATION) {
+					$ratio = tax_get_situation_ratio($db, (int) $assoc['rowid']);
+					if ($ratio === false) {
+						return -3;
+					}
+					foreach (array('total_ht', 'total_vat', 'total_ttc', 'total_localtax1', 'total_localtax2') as $field) {
+						$assoc[$field] = (float) price2num((float) $assoc[$field] * $ratio, 'MT');
+					}
 				}
-
-				// Code to avoid warnings when array entry not defined
-				if (!isset($list[$rate_key]['totalht'])) {
-					$list[$rate_key]['totalht'] = 0;
-				}
-				if (!isset($list[$rate_key]['vat'])) {
-					$list[$rate_key]['vat'] = 0;
-				}
-				if (!isset($list[$rate_key]['localtax1'])) {
-					$list[$rate_key]['localtax1'] = 0;
-				}
-				if (!isset($list[$rate_key]['localtax2'])) {
-					$list[$rate_key]['localtax2'] = 0;
-				}
-
-				if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
-					$oldrowid = $assoc['rowid'];
-					$list[$rate_key]['totalht']   += (float) $assoc['total_ht'];
-					$list[$rate_key]['vat']       += (float) $assoc['total_vat'];
-					$list[$rate_key]['localtax1'] += (float) $assoc['total_localtax1'];
-					$list[$rate_key]['localtax2'] += (float) $assoc['total_localtax2'];
-				}
-				$list[$rate_key]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
-				$list[$rate_key]['dtype'][] = (int) $assoc['dtype'];
-				$list[$rate_key]['datef'][] = $db->jdate($assoc['datef']);
-				$list[$rate_key]['datep'][] = $db->jdate($assoc['datep']);
-
-				$list[$rate_key]['company_name'][] = (string) $assoc['company_name'];
-				$list[$rate_key]['company_id'][] = (int) $assoc['company_id'];
-				$list[$rate_key]['company_alias'][] = (string) $assoc['company_alias'];
-				$list[$rate_key]['company_email'][] = (string) $assoc['company_email'];
-				$list[$rate_key]['company_tva_intra'][] = (string) $assoc['company_tva_intra'];
-				$list[$rate_key]['company_client'][] = (int) $assoc['company_client'];
-				$list[$rate_key]['company_fournisseur'][] = (int) $assoc['company_fournisseur'];
-				$list[$rate_key]['company_customer_code'][] = (string) $assoc['company_customer_code'];
-				$list[$rate_key]['company_supplier_code'][] = (string) $assoc['company_supplier_code'];
-				$list[$rate_key]['company_customer_accounting_code'][] = (string) $assoc['company_customer_accounting_code'];
-				$list[$rate_key]['company_supplier_accounting_code'][] = (string) $assoc['company_supplier_accounting_code'];
-				$list[$rate_key]['company_status'][] = (int) $assoc['company_status'];
-
-				$list[$rate_key]['ddate_start'][] = $db->jdate($assoc['date_start']);
-				$list[$rate_key]['ddate_end'][] = $db->jdate($assoc['date_end']);
-
-				$list[$rate_key]['facid'][] = (int) $assoc['facid'];
-				$list[$rate_key]['facnum'][] = (string) $assoc['facnum'];
-				$list[$rate_key]['type'][] = (int) $assoc['type'];
-				$list[$rate_key]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
-				$list[$rate_key]['descr'][] = (string) $assoc['descr'];
-
-				$list[$rate_key]['totalht_list'][] = (float) $assoc['total_ht'];
-				$list[$rate_key]['vat_list'][] = (float) $assoc['total_vat'];
-				$list[$rate_key]['localtax1_list'][] = (float) $assoc['total_localtax1'];
-				$list[$rate_key]['localtax2_list'][] = (float) $assoc['total_localtax2'];
-
-				$list[$rate_key]['pid'][] = (int) $assoc['pid'];
-				$list[$rate_key]['pref'][] = (string) $assoc['pref'];
-				$list[$rate_key]['ptype'][] = (int) $assoc['ptype'];
-
-				$list[$rate_key]['payment_id'][] = (int) $assoc['payment_id'];
-				$list[$rate_key]['payment_ref'][] = (string) $assoc['payment_ref'];
-				$list[$rate_key]['payment_amount'][] = (float) $assoc['payment_amount'];
-
-				$rate = $assoc['rate'];
 			}
-		} else {
-			dol_print_error($db);
-			return -3;
-		}
-	}
+			$rate_key = $assoc['rate'];
+			if ($f_rate == 'tva_tx' && !empty($assoc['vat_src_code']) && !preg_match('/\(/', $rate_key)) {
+				$rate_key .= ' (' . $assoc['vat_src_code'] . ')';
+			}
 
+			// Code to avoid warnings when array entry not defined
+			if (!isset($list[$rate_key]['totalht'])) {
+				$list[$rate_key]['totalht'] = 0;
+			}
+			if (!isset($list[$rate_key]['vat'])) {
+				$list[$rate_key]['vat'] = 0;
+			}
+			if (!isset($list[$rate_key]['localtax1'])) {
+				$list[$rate_key]['localtax1'] = 0;
+			}
+			if (!isset($list[$rate_key]['localtax2'])) {
+				$list[$rate_key]['localtax2'] = 0;
+			}
+
+			if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
+				$oldrowid = $assoc['rowid'];
+				$list[$rate_key]['totalht'] += (float) $assoc['total_ht'];
+				$list[$rate_key]['vat'] += (float) $assoc['total_vat'];
+				$list[$rate_key]['localtax1'] += (float) $assoc['total_localtax1'];
+				$list[$rate_key]['localtax2'] += (float) $assoc['total_localtax2'];
+			}
+			$list[$rate_key]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
+			$list[$rate_key]['dtype'][] = (int) $assoc['dtype'];
+			$list[$rate_key]['datef'][] = $db->jdate($assoc['datef']);
+			$list[$rate_key]['datep'][] = $db->jdate($assoc['datep']);
+
+			$list[$rate_key]['company_name'][] = (string) $assoc['company_name'];
+			$list[$rate_key]['company_id'][] = (int) $assoc['company_id'];
+			$list[$rate_key]['company_alias'][] = (string) $assoc['company_alias'];
+			$list[$rate_key]['company_email'][] = (string) $assoc['company_email'];
+			$list[$rate_key]['company_tva_intra'][] = (string) $assoc['company_tva_intra'];
+			$list[$rate_key]['company_client'][] = (int) $assoc['company_client'];
+			$list[$rate_key]['company_fournisseur'][] = (int) $assoc['company_fournisseur'];
+			$list[$rate_key]['company_customer_code'][] = (string) $assoc['company_customer_code'];
+			$list[$rate_key]['company_supplier_code'][] = (string) $assoc['company_supplier_code'];
+			$list[$rate_key]['company_customer_accounting_code'][] = (string) $assoc['company_customer_accounting_code'];
+			$list[$rate_key]['company_supplier_accounting_code'][] = (string) $assoc['company_supplier_accounting_code'];
+			$list[$rate_key]['company_status'][] = (int) $assoc['company_status'];
+
+			$list[$rate_key]['ddate_start'][] = $db->jdate($assoc['date_start']);
+			$list[$rate_key]['ddate_end'][] = $db->jdate($assoc['date_end']);
+
+			$list[$rate_key]['facid'][] = (int) $assoc['facid'];
+			$list[$rate_key]['facnum'][] = (string) $assoc['facnum'];
+			$list[$rate_key]['type'][] = (int) $assoc['type'];
+			$list[$rate_key]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
+			$list[$rate_key]['descr'][] = (string) $assoc['descr'];
+
+			$list[$rate_key]['totalht_list'][] = (float) $assoc['total_ht'];
+			$list[$rate_key]['vat_list'][] = (float) $assoc['total_vat'];
+			$list[$rate_key]['localtax1_list'][] = (float) $assoc['total_localtax1'];
+			$list[$rate_key]['localtax2_list'][] = (float) $assoc['total_localtax2'];
+
+			$list[$rate_key]['pid'][] = (int) $assoc['pid'];
+			$list[$rate_key]['pref'][] = (string) $assoc['pref'];
+			$list[$rate_key]['ptype'][] = (int) $assoc['ptype'];
+
+			$list[$rate_key]['payment_id'][] = (int) $assoc['payment_id'];
+			$list[$rate_key]['payment_ref'][] = (string) $assoc['payment_ref'];
+			$list[$rate_key]['payment_amount'][] = (float) $assoc['payment_amount'];
+
+			$rate = $assoc['rate'];
+		}
+	} else {
+		dol_print_error($db);
+		return -3;
+	}
 
 	// CASE OF SERVICES
 
@@ -932,19 +987,22 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 	if (($direction == 'sell' && getDolGlobalString('TAX_MODE_SELL_SERVICE') == 'invoice')
 		|| ($direction == 'buy' && getDolGlobalString('TAX_MODE_BUY_SERVICE') == 'invoice')) {
 		// Count on invoice date
-		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$fk_facture." as facid, d.$f_rate as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$total_tva." as total_vat, d.description as descr,";
-		$sql .= " d.".$total_localtax1." as total_localtax1, d.".$total_localtax2." as total_localtax2, ";
+		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$db->sanitize($fk_facture)." as facid, d.".$db->sanitize($f_rate)." as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$db->sanitize($total_tva)." as total_vat, d.description as descr,";
+		$sql .= " d.".$db->sanitize($total_localtax1)." as total_localtax1, d.".$db->sanitize($total_localtax2)." as total_localtax2, ";
 		$sql .= " d.date_start as date_start, d.date_end as date_end,";
-		$sql .= " f.".$invoicefieldref." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
+		$sql .= " f.".$db->sanitize($invoicefieldref)." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
 		$sql .= " s.nom as company_name, s.name_alias as company_alias, s.rowid as company_id, s.client as company_client, s.fournisseur as company_fournisseur, s.email as company_email,";
 		$sql .= " s.code_client as company_customer_code, s.code_fournisseur as company_supplier_code,";
 		$sql .= " s.code_compta as company_customer_accounting_code, s.code_compta_fournisseur as company_supplier_accounting_code,";
 		$sql .= " s.status as company_status, s.tva_intra as company_tva_intra,";
 		$sql .= " p.rowid as pid, p.ref as pref, p.fk_product_type as ptype,";
 		$sql .= " 0 as payment_id, '' as payment_ref, 0 as payment_amount";
-		$sql .= " FROM ".MAIN_DB_PREFIX.$invoicetable." as f";
+		if ($direction == 'sell' && getDolGlobalInt('INVOICE_USE_SITUATION') == 1) {
+			$sql .= ", '' as datep";
+		}
+		$sql .= " FROM ".MAIN_DB_PREFIX.$db->sanitize($invoicetable)." as f";
 		$sql .= " INNER JOIN ".MAIN_DB_PREFIX."societe as s ON s.rowid = f.fk_soc";
-		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$invoicedettable." as d ON d.".$fk_facture." = f.rowid";
+		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$db->sanitize($invoicedettable)." as d ON d.".$db->sanitize($fk_facture)." = f.rowid";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."product as p on d.fk_product = p.rowid";
 		$sql .= " WHERE f.entity IN (".getEntity($invoicetable).")";
 		$sql .= " AND f.fk_statut in (1,2)"; // Validated or paid (partially or completely)
@@ -978,27 +1036,27 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 		$sql .= " AND (d.product_type = 1"; // Limit to services
 		$sql .= " OR d.date_start is NOT null OR d.date_end IS NOT NULL)"; // enhance detection of service
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.".$total_tva." <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.".$db->sanitize($total_tva)." <> 0)";
 		}
-		$sql .= " ORDER BY d.rowid, d.".$fk_facture;
+		$sql .= " ORDER BY d.rowid, d.".$db->sanitize($fk_facture);
 	} else {
 		// Count on payments date
-		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$fk_facture." as facid, d.$f_rate as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$total_tva." as total_vat, d.description as descr,";
-		$sql .= " d.".$total_localtax1." as total_localtax1, d.".$total_localtax2." as total_localtax2, ";
+		$sql = "SELECT d.rowid, d.product_type as dtype, d.".$db->sanitize($fk_facture)." as facid, d.".$db->sanitize($f_rate)." as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.".$db->sanitize($total_tva)." as total_vat, d.description as descr,";
+		$sql .= " d.".$db->sanitize($total_localtax1)." as total_localtax1, d.".$db->sanitize($total_localtax2)." as total_localtax2, ";
 		$sql .= " d.date_start as date_start, d.date_end as date_end,";
-		$sql .= " f.".$invoicefieldref." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
+		$sql .= " f.".$db->sanitize($invoicefieldref)." as facnum, f.type, f.total_ttc as ftotal_ttc, f.datef,";
 		$sql .= " s.nom as company_name, s.name_alias as company_alias, s.rowid as company_id, s.client as company_client, s.fournisseur as company_fournisseur, s.email as company_email,";
 		$sql .= " s.code_client as company_customer_code, s.code_fournisseur as company_supplier_code,";
 		$sql .= " s.code_compta as company_customer_accounting_code, s.code_compta_fournisseur as company_supplier_accounting_code,";
 		$sql .= " s.status as company_status, s.tva_intra as company_tva_intra,";
 		$sql .= " p.rowid as pid, p.ref as pref, p.fk_product_type as ptype,";
-		$sql .= " pf.".$fk_payment." as payment_id, pf.amount as payment_amount,";
+		$sql .= " pf.".$db->sanitize($fk_payment)." as payment_id, pf.amount as payment_amount,";
 		$sql .= " pa.datep as datep, pa.ref as payment_ref";
-		$sql .= " FROM ".MAIN_DB_PREFIX.$invoicetable." as f";
-		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$paymentfacturetable." as pf ON pf.".$fk_facture2." = f.rowid";
-		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$paymenttable." as pa ON pa.rowid = pf.".$fk_payment;
+		$sql .= " FROM ".MAIN_DB_PREFIX.$db->sanitize($invoicetable)." as f";
+		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$db->sanitize($paymentfacturetable)." as pf ON pf.".$db->sanitize($fk_facture2)." = f.rowid";
+		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$db->sanitize($paymenttable)." as pa ON pa.rowid = pf.".$db->sanitize($fk_payment);
 		$sql .= " INNER JOIN ".MAIN_DB_PREFIX."societe as s ON s.rowid = f.fk_soc";
-		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$invoicedettable." as d ON d.".$fk_facture." = f.rowid";
+		$sql .= " INNER JOIN ".MAIN_DB_PREFIX.$db->sanitize($invoicedettable)." as d ON d.".$db->sanitize($fk_facture)." = f.rowid";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."product as p on d.fk_product = p.rowid";
 		$sql .= " WHERE f.entity IN (".getEntity($invoicetable).")";
 		$sql .= " AND f.fk_statut in (1,2)"; // Paid (partially or completely)
@@ -1020,99 +1078,101 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 		$sql .= " AND (d.product_type = 1"; // Limit to services
 		$sql .= " OR d.date_start is NOT null OR d.date_end IS NOT NULL)"; // enhance detection of service
 		if (getDolGlobalString('MAIN_NOT_INCLUDE_ZERO_VAT_IN_REPORTS')) {
-			$sql .= " AND (d.".$f_rate." <> 0 OR d.".$total_tva." <> 0)";
+			$sql .= " AND (d.".$db->sanitize($f_rate)." <> 0 OR d.".$db->sanitize($total_tva)." <> 0)";
 		}
-		$sql .= " ORDER BY d.rowid, d.".$fk_facture.", pf.rowid";
+		$sql .= " ORDER BY d.rowid, d.".$db->sanitize($fk_facture).", pf.rowid";
 	}
 
-	if (!$sql) {
-		dol_syslog("Tax.lib.php::tax_by_rate no accountancy module enabled".$sql, LOG_ERR);
-		return -1; // -1 = Not accountancy module enabled
-	}
-	if ($sql == 'TODO') {
-		return -2; // -2 = Feature not yet available
-	}
-	if ($sql != 'TODO') {
-		dol_syslog("Tax.lib.php::tax_by_rate", LOG_DEBUG);
-		$resql = $db->query($sql);
-		if ($resql) {
-			$rate = -1;
-			$oldrowid = '';
-			while ($assoc = $db->fetch_array($resql)) {
-				$rate_key = $assoc['rate'];
-				if ($f_rate == 'tva_tx' && !empty($assoc['vat_src_code']) && !preg_match('/\(/', $rate_key)) {
-					$rate_key .= ' (' . $assoc['vat_src_code'] . ')';
+	dol_syslog("Tax.lib.php::tax_by_rate", LOG_DEBUG);
+	$resql = $db->query($sql);
+	if ($resql) {
+		$rate = -1;
+		$oldrowid = '';
+		while ($assoc = $db->fetch_array($resql)) {
+			if ($direction == 'sell' && getDolGlobalInt('INVOICE_USE_SITUATION') == 1) {
+				require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
+				if ((int) $assoc['type'] == Facture::TYPE_SITUATION) {
+					$ratio = tax_get_situation_ratio($db, (int) $assoc['rowid']);
+					if ($ratio === false) {
+						return -3;
+					}
+					foreach (array('total_ht', 'total_vat', 'total_ttc', 'total_localtax1', 'total_localtax2') as $field) {
+						$assoc[$field] = (float) price2num((float) $assoc[$field] * $ratio, 'MT');
+					}
 				}
-
-				// Code to avoid warnings when array entry not defined
-				if (!isset($list[$rate_key]['totalht'])) {
-					$list[$rate_key]['totalht'] = 0;
-				}
-				if (!isset($list[$rate_key]['vat'])) {
-					$list[$rate_key]['vat'] = 0;
-				}
-				if (!isset($list[$rate_key]['localtax1'])) {
-					$list[$rate_key]['localtax1'] = 0;
-				}
-				if (!isset($list[$rate_key]['localtax2'])) {
-					$list[$rate_key]['localtax2'] = 0;
-				}
-
-				if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
-					$oldrowid = $assoc['rowid'];
-					$list[$rate_key]['totalht']   += (float) $assoc['total_ht'];
-					$list[$rate_key]['vat']       += (float) $assoc['total_vat'];
-					$list[$rate_key]['localtax1'] += (float) $assoc['total_localtax1'];
-					$list[$rate_key]['localtax2'] += (float) $assoc['total_localtax2'];
-				}
-				$list[$rate_key]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
-				$list[$rate_key]['dtype'][] = (int) $assoc['dtype'];
-				$list[$rate_key]['datef'][] = $db->jdate($assoc['datef']);
-				$list[$rate_key]['datep'][] = $db->jdate($assoc['datep']);
-
-				$list[$rate_key]['ddate_start'][] = $db->jdate($assoc['date_start']);
-				$list[$rate_key]['ddate_end'][] = $db->jdate($assoc['date_end']);
-
-				$list[$rate_key]['company_name'][] = (string) $assoc['company_name'];
-				$list[$rate_key]['company_id'][] = (int) $assoc['company_id'];
-				$list[$rate_key]['company_alias'][] = (string) $assoc['company_alias'];
-				$list[$rate_key]['company_email'][] = (string) $assoc['company_email'];
-				$list[$rate_key]['company_tva_intra'][] = (string) $assoc['company_tva_intra'];
-				$list[$rate_key]['company_client'][] = (int) $assoc['company_client'];
-				$list[$rate_key]['company_fournisseur'][] = (int) $assoc['company_fournisseur'];
-				$list[$rate_key]['company_customer_code'][] = (string) $assoc['company_customer_code'];
-				$list[$rate_key]['company_supplier_code'][] = (string) $assoc['company_supplier_code'];
-				$list[$rate_key]['company_customer_accounting_code'][] = (string) $assoc['company_customer_accounting_code'];
-				$list[$rate_key]['company_supplier_accounting_code'][] = (string) $assoc['company_supplier_accounting_code'];
-				$list[$rate_key]['company_status'][] = (int) $assoc['company_status'];
-
-				$list[$rate_key]['facid'][] = (int) $assoc['facid'];
-				$list[$rate_key]['facnum'][] = (string) $assoc['facnum'];
-				$list[$rate_key]['type'][] = (int) $assoc['type'];
-				$list[$rate_key]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
-				$list[$rate_key]['descr'][] = (string) $assoc['descr'];
-
-				$list[$rate_key]['totalht_list'][] = (float) $assoc['total_ht'];
-				$list[$rate_key]['vat_list'][] = (float) $assoc['total_vat'];
-				$list[$rate_key]['localtax1_list'][] = (float) $assoc['total_localtax1'];
-				$list[$rate_key]['localtax2_list'][] = (float) $assoc['total_localtax2'];
-
-				$list[$rate_key]['pid'][] = (int) $assoc['pid'];
-				$list[$rate_key]['pref'][] = (string) $assoc['pref'];
-				$list[$rate_key]['ptype'][] = (int) $assoc['ptype'];
-
-				$list[$rate_key]['payment_id'][] = (int) $assoc['payment_id'];
-				$list[$rate_key]['payment_ref'][] = (string) $assoc['payment_ref'];
-				$list[$rate_key]['payment_amount'][] = (float) $assoc['payment_amount'];
-
-				$rate = $assoc['rate'];
 			}
-		} else {
-			dol_print_error($db);
-			return -3;
-		}
-	}
+			$rate_key = $assoc['rate'];
+			if ($f_rate == 'tva_tx' && !empty($assoc['vat_src_code']) && !preg_match('/\(/', $rate_key)) {
+				$rate_key .= ' (' . $assoc['vat_src_code'] . ')';
+			}
 
+			// Code to avoid warnings when array entry not defined
+			if (!isset($list[$rate_key]['totalht'])) {
+				$list[$rate_key]['totalht'] = 0;
+			}
+			if (!isset($list[$rate_key]['vat'])) {
+				$list[$rate_key]['vat'] = 0;
+			}
+			if (!isset($list[$rate_key]['localtax1'])) {
+				$list[$rate_key]['localtax1'] = 0;
+			}
+			if (!isset($list[$rate_key]['localtax2'])) {
+				$list[$rate_key]['localtax2'] = 0;
+			}
+
+			if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
+				$oldrowid = $assoc['rowid'];
+				$list[$rate_key]['totalht'] += (float) $assoc['total_ht'];
+				$list[$rate_key]['vat'] += (float) $assoc['total_vat'];
+				$list[$rate_key]['localtax1'] += (float) $assoc['total_localtax1'];
+				$list[$rate_key]['localtax2'] += (float) $assoc['total_localtax2'];
+			}
+			$list[$rate_key]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
+			$list[$rate_key]['dtype'][] = (int) $assoc['dtype'];
+			$list[$rate_key]['datef'][] = $db->jdate($assoc['datef']);
+			$list[$rate_key]['datep'][] = $db->jdate($assoc['datep']);
+
+			$list[$rate_key]['ddate_start'][] = $db->jdate($assoc['date_start']);
+			$list[$rate_key]['ddate_end'][] = $db->jdate($assoc['date_end']);
+
+			$list[$rate_key]['company_name'][] = (string) $assoc['company_name'];
+			$list[$rate_key]['company_id'][] = (int) $assoc['company_id'];
+			$list[$rate_key]['company_alias'][] = (string) $assoc['company_alias'];
+			$list[$rate_key]['company_email'][] = (string) $assoc['company_email'];
+			$list[$rate_key]['company_tva_intra'][] = (string) $assoc['company_tva_intra'];
+			$list[$rate_key]['company_client'][] = (int) $assoc['company_client'];
+			$list[$rate_key]['company_fournisseur'][] = (int) $assoc['company_fournisseur'];
+			$list[$rate_key]['company_customer_code'][] = (string) $assoc['company_customer_code'];
+			$list[$rate_key]['company_supplier_code'][] = (string) $assoc['company_supplier_code'];
+			$list[$rate_key]['company_customer_accounting_code'][] = (string) $assoc['company_customer_accounting_code'];
+			$list[$rate_key]['company_supplier_accounting_code'][] = (string) $assoc['company_supplier_accounting_code'];
+			$list[$rate_key]['company_status'][] = (int) $assoc['company_status'];
+
+			$list[$rate_key]['facid'][] = (int) $assoc['facid'];
+			$list[$rate_key]['facnum'][] = (string) $assoc['facnum'];
+			$list[$rate_key]['type'][] = (int) $assoc['type'];
+			$list[$rate_key]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
+			$list[$rate_key]['descr'][] = (string) $assoc['descr'];
+
+			$list[$rate_key]['totalht_list'][] = (float) $assoc['total_ht'];
+			$list[$rate_key]['vat_list'][] = (float) $assoc['total_vat'];
+			$list[$rate_key]['localtax1_list'][] = (float) $assoc['total_localtax1'];
+			$list[$rate_key]['localtax2_list'][] = (float) $assoc['total_localtax2'];
+
+			$list[$rate_key]['pid'][] = (int) $assoc['pid'];
+			$list[$rate_key]['pref'][] = (string) $assoc['pref'];
+			$list[$rate_key]['ptype'][] = (int) $assoc['ptype'];
+
+			$list[$rate_key]['payment_id'][] = (int) $assoc['payment_id'];
+			$list[$rate_key]['payment_ref'][] = (string) $assoc['payment_ref'];
+			$list[$rate_key]['payment_amount'][] = (float) $assoc['payment_amount'];
+
+			$rate = $assoc['rate'];
+		}
+	} else {
+		dol_print_error($db);
+		return -3;
+	}
 
 	// CASE OF EXPENSE REPORT
 
@@ -1121,7 +1181,7 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 		$sql = '';
 
 		// Count on payments date
-		$sql = "SELECT d.rowid, d.product_type as dtype, e.rowid as facid, d.$f_rate as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.total_tva as total_vat, e.note_private as descr,";
+		$sql = "SELECT d.rowid, d.product_type as dtype, e.rowid as facid, d.".$db->sanitize($f_rate)." as rate, d.vat_src_code as vat_src_code, d.total_ht as total_ht, d.total_ttc as total_ttc, d.total_tva as total_vat, e.note_private as descr,";
 		$sql .= " d.total_localtax1 as total_localtax1, d.total_localtax2 as total_localtax2, ";
 		$sql .= " e.date_debut as date_start, e.date_fin as date_end, e.fk_user_author,";
 		$sql .= " e.ref as facnum, e.ref as pref, e.total_ttc as ftotal_ttc, e.date_create, d.fk_c_type_fees as type,";
@@ -1129,7 +1189,7 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 		$sql .= " FROM ".MAIN_DB_PREFIX."expensereport as e";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."expensereport_det as d ON d.fk_expensereport = e.rowid";
 		$sql .= " LEFT JOIN ".MAIN_DB_PREFIX."payment_expensereport as p ON p.fk_expensereport = e.rowid";
-		$sql .= " WHERE e.entity = ".$conf->entity;
+		$sql .= " WHERE e.entity = ".((int) $conf->entity);
 		$sql .= " AND e.fk_statut in (6)";
 		if ($y && $m) {
 			$sql .= " AND p.datep >= '".$db->idate(dol_get_first_day($y, $m, false))."'";
@@ -1152,81 +1212,72 @@ function tax_by_rate($type, $db, $y, $q, $date_start, $date_end, $modetax, $dire
 		}
 		$sql .= " ORDER BY e.rowid";
 
-		if (!$sql) {
-			dol_syslog("Tax.lib.php::tax_by_rate no accountancy module enabled".$sql, LOG_ERR);
-			return -1; // -1 = Not accountancy module enabled
-		}
-		if ($sql == 'TODO') {
-			return -2; // -2 = Feature not yet available
-		}
-		if ($sql != 'TODO') {
-			dol_syslog("Tax.lib.php::tax_by_rate", LOG_DEBUG);
-			$resql = $db->query($sql);
-			if ($resql) {
-				$rate = -1;
-				$oldrowid = '';
-				while ($assoc = $db->fetch_array($resql)) {
-					$rate_key = $assoc['rate'];
-					if ($f_rate == 'tva_tx' && !empty($assoc['vat_src_code']) && !preg_match('/\(/', $rate_key)) {
-						$rate_key .= ' (' . $assoc['vat_src_code'] . ')';
-					}
-
-					// Code to avoid warnings when array entry not defined
-					if (!isset($list[$rate_key]['totalht'])) {
-						$list[$rate_key]['totalht'] = 0;
-					}
-					if (!isset($list[$rate_key]['vat'])) {
-						$list[$rate_key]['vat'] = 0;
-					}
-					if (!isset($list[$rate_key]['localtax1'])) {
-						$list[$rate_key]['localtax1'] = 0;
-					}
-					if (!isset($list[$rate_key]['localtax2'])) {
-						$list[$rate_key]['localtax2'] = 0;
-					}
-
-					if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
-						$oldrowid = $assoc['rowid'];
-						$list[$rate_key]['totalht']   += (float) $assoc['total_ht'];
-						$list[$rate_key]['vat'] += (float) $assoc['total_vat'];
-						$list[$rate_key]['localtax1'] += (float) $assoc['total_localtax1'];
-						$list[$rate_key]['localtax2'] += (float) $assoc['total_localtax2'];
-					}
-
-					$list[$rate_key]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
-					$list[$rate_key]['dtype'][] = 'ExpenseReportPayment';
-					$list[$rate_key]['datef'][] = (int) $assoc['datef'];
-					$list[$rate_key]['company_name'][] = '';
-					$list[$rate_key]['company_id'][] = 0;
-					$list[$rate_key]['user_id'][] = (int) $assoc['fk_user_author'];
-					$list[$rate_key]['ddate_start'][] = $db->jdate($assoc['date_start']);
-					$list[$rate_key]['ddate_end'][] = $db->jdate($assoc['date_end']);
-
-					$list[$rate_key]['facid'][] = (int) $assoc['facid'];
-					$list[$rate_key]['facnum'][] = (string) $assoc['facnum'];
-					$list[$rate_key]['type'][] = (int) $assoc['type'];
-					$list[$rate_key]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
-					$list[$rate_key]['descr'][] = (string) $assoc['descr'];
-
-					$list[$rate_key]['totalht_list'][] = (float) $assoc['total_ht'];
-					$list[$rate_key]['vat_list'][] = (float) $assoc['total_vat'];
-					$list[$rate_key]['localtax1_list'][] = (float) $assoc['total_localtax1'];
-					$list[$rate_key]['localtax2_list'][] = (float) $assoc['total_localtax2'];
-
-					$list[$rate_key]['pid'][] = (int) $assoc['pid'];
-					$list[$rate_key]['pref'][] = (string) $assoc['pref'];
-					$list[$rate_key]['ptype'][] = 'ExpenseReportPayment';
-
-					$list[$rate_key]['payment_id'][] = (int) $assoc['payment_id'];
-					$list[$rate_key]['payment_ref'][] = (string) $assoc['payment_ref'];
-					$list[$rate_key]['payment_amount'][] = (float) $assoc['payment_amount'];
-
-					$rate = $assoc['rate'];
+		dol_syslog("Tax.lib.php::tax_by_rate", LOG_DEBUG);
+		$resql = $db->query($sql);
+		if ($resql) {
+			$rate = -1;
+			$oldrowid = '';
+			while ($assoc = $db->fetch_array($resql)) {
+				$rate_key = $assoc['rate'];
+				if ($f_rate == 'tva_tx' && !empty($assoc['vat_src_code']) && !preg_match('/\(/', $rate_key)) {
+					$rate_key .= ' (' . $assoc['vat_src_code'] . ')';
 				}
-			} else {
-				dol_print_error($db);
-				return -3;
+
+				// Code to avoid warnings when array entry not defined
+				if (!isset($list[$rate_key]['totalht'])) {
+					$list[$rate_key]['totalht'] = 0;
+				}
+				if (!isset($list[$rate_key]['vat'])) {
+					$list[$rate_key]['vat'] = 0;
+				}
+				if (!isset($list[$rate_key]['localtax1'])) {
+					$list[$rate_key]['localtax1'] = 0;
+				}
+				if (!isset($list[$rate_key]['localtax2'])) {
+					$list[$rate_key]['localtax2'] = 0;
+				}
+
+				if ($assoc['rowid'] != $oldrowid) {       // Si rupture sur d.rowid
+					$oldrowid = $assoc['rowid'];
+					$list[$rate_key]['totalht'] += (float) $assoc['total_ht'];
+					$list[$rate_key]['vat'] += (float) $assoc['total_vat'];
+					$list[$rate_key]['localtax1'] += (float) $assoc['total_localtax1'];
+					$list[$rate_key]['localtax2'] += (float) $assoc['total_localtax2'];
+				}
+
+				$list[$rate_key]['dtotal_ttc'][] = (float) $assoc['total_ttc'];
+				$list[$rate_key]['dtype'][] = 'ExpenseReportPayment';
+				$list[$rate_key]['datef'][] = (int) $assoc['datef'];
+				$list[$rate_key]['company_name'][] = '';
+				$list[$rate_key]['company_id'][] = 0;
+				$list[$rate_key]['user_id'][] = (int) $assoc['fk_user_author'];
+				$list[$rate_key]['ddate_start'][] = $db->jdate($assoc['date_start']);
+				$list[$rate_key]['ddate_end'][] = $db->jdate($assoc['date_end']);
+
+				$list[$rate_key]['facid'][] = (int) $assoc['facid'];
+				$list[$rate_key]['facnum'][] = (string) $assoc['facnum'];
+				$list[$rate_key]['type'][] = (int) $assoc['type'];
+				$list[$rate_key]['ftotal_ttc'][] = (float) $assoc['ftotal_ttc'];
+				$list[$rate_key]['descr'][] = (string) $assoc['descr'];
+
+				$list[$rate_key]['totalht_list'][] = (float) $assoc['total_ht'];
+				$list[$rate_key]['vat_list'][] = (float) $assoc['total_vat'];
+				$list[$rate_key]['localtax1_list'][] = (float) $assoc['total_localtax1'];
+				$list[$rate_key]['localtax2_list'][] = (float) $assoc['total_localtax2'];
+
+				$list[$rate_key]['pid'][] = (int) $assoc['pid'];
+				$list[$rate_key]['pref'][] = (string) $assoc['pref'];
+				$list[$rate_key]['ptype'][] = 'ExpenseReportPayment';
+
+				$list[$rate_key]['payment_id'][] = (int) $assoc['payment_id'];
+				$list[$rate_key]['payment_ref'][] = (string) $assoc['payment_ref'];
+				$list[$rate_key]['payment_amount'][] = (float) $assoc['payment_amount'];
+
+				$rate = $assoc['rate'];
 			}
+		} else {
+			dol_print_error($db);
+			return -3;
 		}
 	}
 

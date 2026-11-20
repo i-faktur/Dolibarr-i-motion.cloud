@@ -1,7 +1,7 @@
 <?php
 /* Copyright (C) 2010 Laurent Destailleur  <eldy@users.sourceforge.net>
  * Copyright (C) 2023 Alexandre Janniaux   <alexandre.janniaux@gmail.com>
- * Copyright (C) 2024       Frédéric France         <frederic.france@free.fr>
+ * Copyright (C) 2024-2025  Frédéric France         <frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -59,7 +59,7 @@ class CommandeTest extends CommonClassTest
 		global $conf,$user,$langs,$db;
 		$db->begin(); // This is to have all actions inside a transaction even if test launched without suite.
 
-		if (!isModEnabled('commande')) {
+		if (!isModEnabled('order')) {
 			print __METHOD__." module customer order must be enabled.\n";
 			die(1);
 		}
@@ -87,7 +87,10 @@ class CommandeTest extends CommonClassTest
 		$this->assertLessThan($socid, 0, $soc->errorsToString());
 
 		$localobject = new Commande($db);
-		$localobject->initAsSpecimen();
+		$param = array('tosell' => 1);
+		$localobject->initAsSpecimen($param);
+		// Persist a regular provisional order instead of keeping the specimen reference.
+		$localobject->ref = '';
 		$localobject->socid = $socid;
 		$result = $localobject->create($user);
 
@@ -163,10 +166,37 @@ class CommandeTest extends CommonClassTest
 		$langs = $this->savlangs;
 		$db = $this->savdb;
 
-		$result = $localobject->valid($user);
+		$oldref = dol_sanitizeFileName($localobject->ref);
+		$outputdir = getMultidirOutput($localobject);
+		$dirsource = $outputdir.'/'.$oldref;
+		$oldfile = $dirsource.'/'.$oldref.'.pdf';
+		$dirnew = '';
+		$newfile = '';
 
-		print __METHOD__." id=".$localobject->id." result=".$result."\n";
-		$this->assertLessThan($result, 0);
+		try {
+			$this->assertGreaterThanOrEqual(0, dol_mkdir($dirsource));
+			$this->assertNotFalse(file_put_contents($oldfile, 'Provisional order document'));
+
+			$result = $localobject->valid($user);
+
+			print __METHOD__." id=".$localobject->id." result=".$result."\n";
+			$this->assertLessThan($result, 0);
+
+			$newref = dol_sanitizeFileName($localobject->ref);
+			$dirnew = $outputdir.'/'.$newref;
+			$newfile = $dirnew.'/'.$newref.'.pdf';
+			$this->assertFileExists($newfile);
+			$this->assertFileNotExistsCompat($dirnew.'/'.$oldref.'.pdf');
+		} finally {
+			if ($newfile) {
+				@unlink($newfile);
+			}
+			@unlink($oldfile);
+			if ($dirnew) {
+				@rmdir($dirnew);
+			}
+			@rmdir($dirsource);
+		}
 		return $localobject;
 	}
 
@@ -187,7 +217,7 @@ class CommandeTest extends CommonClassTest
 		$langs = $this->savlangs;
 		$db = $this->savdb;
 
-		$result = $localobject->cancel();
+		$result = $localobject->cancel($user);
 
 		print __METHOD__." id=".$localobject->id." result=".$result."\n";
 		$this->assertLessThan($result, 0);
@@ -247,5 +277,155 @@ class CommandeTest extends CommonClassTest
 		print __METHOD__." id=".$id." result=".$result."\n";
 		$this->assertLessThan($result, 0);
 		return $result;
+	}
+
+	/**
+	 * testCommandeUpdatelinePackaging
+	 *
+	 * With PRODUCT_USE_CUSTOMER_PACKAGING, when a line is updated, the amounts must be computed
+	 * on the quantity rounded to the packaging, not on the quantity typed.
+	 *
+	 * @return  void
+	 */
+	public function testCommandeUpdatelinePackaging()
+	{
+		global $conf,$user,$langs,$db;
+		$conf = $this->savconf;
+		$user = $this->savuser;
+		$langs = $this->savlangs;
+		$db = $this->savdb;
+
+		$savconst = getDolGlobalString('PRODUCT_USE_CUSTOMER_PACKAGING');
+		$conf->global->PRODUCT_USE_CUSTOMER_PACKAGING = 1;
+
+		$product = new Product($db);
+		$product->ref = 'PHPUNIT-PACKAGING-'.dol_print_date(dol_now(), 'dayhourlog').'-'.mt_rand(100, 999);
+		$product->label = 'Product sold by packaging of 6';
+		$product->type = Product::TYPE_PRODUCT;
+		$product->price = 10;
+		$product->tva_tx = 20;
+		$product->packaging = 6;
+		$productid = $product->create($user);
+		$this->assertGreaterThan(0, $productid, (string) $product->error);
+
+		$localobject = new Commande($db);
+		$localobject->socid = 1;
+		$localobject->date = dol_now();
+		$this->assertGreaterThan(0, $localobject->create($user), (string) $localobject->error);
+		$localobject->fetch_thirdparty();
+
+		$lineid = $localobject->addline('Line', 10, 6, 20, 0, 0, $productid);
+		$this->assertGreaterThan(0, $lineid, (string) $localobject->error);
+		$result = $localobject->updateline($lineid, 'Line', 10, 7, 0, 20);
+		$this->assertGreaterThan(0, $result, (string) $localobject->error);
+
+		$line = new OrderLine($db);
+		$line->fetch($lineid);
+		$conf->global->PRODUCT_USE_CUSTOMER_PACKAGING = $savconst;
+
+		print __METHOD__." qty=".$line->qty." total_ht=".$line->total_ht."\n";
+		$this->assertEquals(12, $line->qty, 'Quantity 7 rounded to the packaging of 6');
+		$this->assertEquals(120, $line->total_ht, 'Total of the rounded quantity 12, not of 7');
+	}
+
+	/**
+	 * Create a product with a packaging of quantities and a draft order, with PRODUCT_USE_CUSTOMER_PACKAGING enabled.
+	 * The caller must restore PRODUCT_USE_CUSTOMER_PACKAGING with the returned value.
+	 *
+	 * @param	float	$packaging	Packaging of quantities of the product
+	 * @return	array{0:Commande,1:int,2:string}	Draft order, id of product, previous value of PRODUCT_USE_CUSTOMER_PACKAGING
+	 */
+	private function initPackagingOrder($packaging)
+	{
+		global $conf, $user, $db;
+
+		$savconst = getDolGlobalString('PRODUCT_USE_CUSTOMER_PACKAGING');
+		$conf->global->PRODUCT_USE_CUSTOMER_PACKAGING = 1;
+
+		$product = new Product($db);
+		$product->ref = 'PHPUNIT-PACKAGING-'.dol_print_date(dol_now(), 'dayhourlog').'-'.mt_rand(100, 999);
+		$product->label = 'Product sold by packaging of '.$packaging;
+		$product->type = Product::TYPE_PRODUCT;
+		$product->price = 10;
+		$product->tva_tx = 20;
+		$product->packaging = $packaging;
+		$productid = $product->create($user);
+		$this->assertGreaterThan(0, $productid, (string) $product->error);
+
+		$order = new Commande($db);
+		$order->socid = 1;
+		$order->date = dol_now();
+		$this->assertGreaterThan(0, $order->create($user), (string) $order->error);
+		$order->fetch_thirdparty();
+
+		return array($order, $productid, $savconst);
+	}
+
+	/**
+	 * testCommandeNegativeQtyPackaging
+	 *
+	 * With PRODUCT_USE_CUSTOMER_PACKAGING, the rounding of a negative quantity must keep the sign.
+	 *
+	 * @return  void
+	 */
+	public function testCommandeNegativeQtyPackaging()
+	{
+		global $conf,$user,$langs,$db;
+		$conf = $this->savconf;
+		$user = $this->savuser;
+		$langs = $this->savlangs;
+		$db = $this->savdb;
+
+		list($localobject, $productid, $savconst) = $this->initPackagingOrder(6);
+
+		$result = array();
+		foreach (array(-4, -7, -12) as $qty) {
+			$lineid = $localobject->addline('Line', 10, $qty, 20, 0, 0, $productid);
+			$this->assertGreaterThan(0, $lineid, (string) $localobject->error);
+			$line = new OrderLine($db);
+			$line->fetch($lineid);
+			$result['add '.$qty] = (float) $line->qty;
+		}
+		$localobject->updateline($lineid, 'Line', 10, -7, 0, 20);
+		$line = new OrderLine($db);
+		$line->fetch($lineid);
+		$result['update -7'] = (float) $line->qty;
+		$conf->global->PRODUCT_USE_CUSTOMER_PACKAGING = $savconst;
+
+		print __METHOD__." result=".json_encode($result)."\n";
+		$this->assertEquals(array('add -4' => -6, 'add -7' => -12, 'add -12' => -12, 'update -7' => -12), $result, 'Negative quantities rounded to the packaging of 6');
+	}
+
+	/**
+	 * testCommandeDecimalPackaging
+	 *
+	 * With PRODUCT_USE_CUSTOMER_PACKAGING, a quantity multiple of a decimal packaging must not be rounded
+	 * to the next multiple (fmod(1, 0.1) is 0.0999..., not 0).
+	 *
+	 * @return  void
+	 */
+	public function testCommandeDecimalPackaging()
+	{
+		global $conf,$user,$langs,$db;
+		$conf = $this->savconf;
+		$user = $this->savuser;
+		$langs = $this->savlangs;
+		$db = $this->savdb;
+
+		list($localobject, $productid, $savconst) = $this->initPackagingOrder(0.1);
+
+		$lineid = $localobject->addline('Line', 10, 0.1, 20, 0, 0, $productid);
+		$this->assertGreaterThan(0, $lineid, (string) $localobject->error);
+		$result = array();
+		foreach (array(0.5, 1, 2.2, 0.25) as $qty) {
+			$localobject->updateline($lineid, 'Line', 10, $qty, 0, 20);
+			$line = new OrderLine($db);
+			$line->fetch($lineid);
+			$result['update '.$qty] = (float) $line->qty;
+		}
+		$conf->global->PRODUCT_USE_CUSTOMER_PACKAGING = $savconst;
+
+		print __METHOD__." result=".json_encode($result)."\n";
+		$this->assertEquals(array('update 0.5' => 0.5, 'update 1' => 1, 'update 2.2' => 2.2, 'update 0.25' => 0.3), $result, 'Quantities with a packaging of 0.1');
 	}
 }

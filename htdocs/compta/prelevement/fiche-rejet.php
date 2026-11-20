@@ -107,7 +107,7 @@ $rej = new RejetPrelevement($db, $user, $type);
 llxHeader('', $langs->trans("WithdrawalsReceipts"));
 
 if ($id > 0 || $ref) {
-	if ($object->fetch($id, $ref) >= 0) {
+	if ($object->fetch($id, $ref) > 0) {
 		$head = prelevement_prepare_head($object);
 		print dol_get_fiche_head($head, 'rejects', $langs->trans("WithdrawalsReceipts"), -1, 'payment');
 
@@ -209,7 +209,7 @@ if ($id > 0 || $ref) {
 
 		print dol_get_fiche_end();
 	} else {
-		dol_print_error($db);
+		recordNotFound('', 0);
 	}
 }
 
@@ -236,7 +236,7 @@ $nbtotalofrecords = '';
 if (!getDolGlobalInt('MAIN_DISABLE_FULL_SCANLIST')) {
 	$result = $db->query($sql);
 	$nbtotalofrecords = $db->num_rows($result);
-	if (($page * $limit) > $nbtotalofrecords) {	// if total resultset is smaller then paging size (filtering), goto and load page 0
+	if (($page * $limit) > (int) $nbtotalofrecords) {	// if total resultset is smaller then paging size (filtering), goto and load page 0
 		$page = 0;
 		$offset = 0;
 	}

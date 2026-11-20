@@ -24,6 +24,11 @@ if (strpos($_SERVER["PHP_SELF"], 'website/samples/wrapper.php')) {
 if (!defined('USEDOLIBARRSERVER') && !defined('USEDOLIBARREDITOR')) {
 	require_once './master.inc.php';
 } // Load master if not already loaded
+/**
+ * @var Conf $conf
+ * @var DoliDB $db
+ * @var Translate $langs
+ */
 include_once DOL_DOCUMENT_ROOT.'/core/lib/images.lib.php';
 
 $encoding = '';
@@ -40,6 +45,11 @@ if ($limit <= 0 || $limit > 100) {
 	$limit = 20;
 }
 
+// Security check
+if ($hashp == 'shared') {
+	httponly_accessforbidden('Bad link. Bad value for parameter hashp', 400);
+}
+
 // Parameters for RSS
 $rss = GETPOST('rss', 'aZ09');
 if ($rss) {
@@ -47,7 +57,7 @@ if ($rss) {
 }
 
 // If we have a hash public (hashp), we guess the original_file.
-if (!empty($hashp)) {
+if (!empty($hashp) && $hashp != 'shared') {
 	include_once DOL_DOCUMENT_ROOT.'/ecm/class/ecmfiles.class.php';
 	include_once DOL_DOCUMENT_ROOT.'/core/lib/images.lib.php';
 	$ecmfile = new EcmFiles($db);
@@ -146,7 +156,7 @@ if ($rss) {
 	$format = 'rss';
 	$type = '';
 	$filename = $original_file;
-	$dir_temp = $conf->website->dir_temp;
+	$dir_temp = (string) $conf->website->dir_temp;
 
 	include_once DOL_DOCUMENT_ROOT.'/website/class/website.class.php';
 	include_once DOL_DOCUMENT_ROOT.'/website/class/websitepage.class.php';
@@ -270,7 +280,8 @@ if ($rss) {
 	$outputfile = $dir_temp.'/'.$filename;
 	$result = readfile($outputfile);
 	if (!$result) {
-		print 'File '.$outputfile.' was empty.';
+		dol_syslog("File ".$outputfile." was empty", LOG_WARNING);	// The path of the file is not shown on this public page
+		print 'File '.dol_escape_htmltag($filename).' was empty.';
 	}
 
 	// header("Location: ".DOL_URL_ROOT.'/document.php?modulepart=agenda&file='.urlencode($filename));
@@ -285,7 +296,7 @@ if ($rss) {
 	$accessallowed              = empty($check_access['accessallowed']) ? '' : $check_access['accessallowed'];
 	$sqlprotectagainstexternals = empty($check_access['sqlprotectagainstexternals']) ? '' : $check_access['sqlprotectagainstexternals'];
 	$fullpath_original_file     = empty($check_access['original_file']) ? '' : $check_access['original_file']; // $fullpath_original_file is now a full path name
-	if ($hashp) {
+	if (!empty($hashp) && $hashp != 'shared') {
 		$accessallowed = 1; // When using hashp, link is public so we force $accessallowed
 		$sqlprotectagainstexternals = '';
 	}

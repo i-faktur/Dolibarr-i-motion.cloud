@@ -2,7 +2,7 @@
 /* Copyright (C) 2010-2012  Laurent Destailleur <eldy@users.sourceforge.net>
  * Copyright (C) 2011-2012  Regis Houssin       <regis.houssin@inodbox.com>
  * Copyright (C) 2024		MDW							<mdeweerd@users.noreply.github.com>
- * Copyright (C) 2024       Frédéric France         <frederic.france@free.fr>
+ * Copyright (C) 2024-2026  Frédéric France         <frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,11 +23,17 @@
  *      \file       test/phpunit/AllTests.php
  *      \ingroup    test
  *      \brief      This file is a test suite to run all unit tests
- *      \remarks    To run this script as CLI:  phpunit filename.php
+ *      \remarks    To run this script as CLI:
+ *      			phpunit filename.php
+ *      			phpunit --stop-on-failure filename.php
  */
 
 print "PHP Version: ".phpversion()."\n";
 print "Memory limit: ". ini_get('memory_limit')."\n";
+print "PHPUNIT_DISABLE_API: ". getenv('PHPUNIT_DISABLE_API')."\n";
+print "PHPUNIT_DISABLE_SOURCE_SCAN: ". getenv('PHPUNIT_DISABLE_SOURCE_SCAN')."\n";
+print "DOL_CTI_ADMIN_LOGIN: ".getenv('DOL_CTI_ADMIN_LOGIN')."\n";
+print "DOL_CTI_ADMIN_PASSWORD: ".substr(getenv('DOL_CTI_ADMIN_PASSWORD'), 0, 3).'...'."\n";
 
 // Workaround for false security issue with main.inc.php on Windows in tests:
 if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
@@ -38,28 +44,50 @@ if (! defined('NOREQUIREUSER')) {
 	define('PHPUNIT_MODE', 1);
 }
 
-global $conf,$user,$langs,$db;
+global $conf,$user,$langs,$db,$mysoc;
 //define('TEST_DB_FORCE_TYPE','mysql'); // This is to force using mysql driver
 //require_once 'PHPUnit/Autoload.php';
+
 require_once dirname(__FILE__).'/../../htdocs/master.inc.php';
 print 'DOL_MAIN_URL_ROOT='.DOL_MAIN_URL_ROOT."\n";  // constant will be used by other tests
-
 
 if ($langs->defaultlang != 'en_US') {
 	print "Error: Default language for company to run tests must be set to en_US or auto. Current is ".$langs->defaultlang."\n";
 	exit(1);
 }
-if (!isModEnabled('member')) {
-	print "Error: Module member must be enabled to have significant results.\n";
+
+// Check required and forbidden modules for tests
+$phpunit_modules_check = array(
+	// module name => array('required' => bool, 'blocking' => bool, 'message' => string)
+	'member' => array('required' => true, 'blocking' => true, 'message' => 'Module member must be enabled to have significant results.'),
+	'debugbar' => array('required' => false, 'blocking' => true, 'message' => 'Debugbar module should not be enabled. It generates troubles in db management.'),
+	'ldap' => array('required' => false, 'blocking' => true, 'message' => 'LDAP module should not be enabled.'),
+	// other external modules
+	'cabinetmed' => array('required' => false, 'blocking' => true, 'message' => 'DoliMed module should not be enabled.'),
+	'einvoicing' => array('required' => false, 'blocking' => true, 'message' => 'EInvoicing module should not be enabled.'),
+	'google' => array('required' => false, 'blocking' => true, 'message' => 'Google module should not be enabled.'),
+	'numberwords' => array('required' => false, 'blocking' => false, 'message' => 'Numberwords module should not be enabled.'),
+);
+
+$error = 0;
+foreach ($phpunit_modules_check as $module => $config) {
+	$enabled = isModEnabled($module);
+	if ($config['required'] && !$enabled) {
+		print "Error: ".$config['message']."\n";
+		if ($config['blocking']) {
+			$error++;
+		}
+	} elseif (!$config['required'] && $enabled) {
+		print ($config['blocking'] ? "Error: " : "Warning: ").$config['message']."\n";
+		if ($config['blocking']) {
+			$error++;
+		}
+	}
+}
+if ($error) {
 	exit(1);
 }
-if (isModEnabled('ldap')) {
-	print "Error: LDAP module should not be enabled.\n";
-	exit(1);
-}
-if (isModEnabled('google')) {
-	print "Warning: Google module should not be enabled.\n";
-}
+
 if (empty($user->id)) {
 	print "Load permissions for admin user nb 1\n";
 	$user->fetch(1);
@@ -67,6 +95,23 @@ if (empty($user->id)) {
 }
 $conf->global->MAIN_DISABLE_ALL_MAILS = 1;
 $conf->global->MAIN_UMASK = '666';
+$now = dol_now();
+
+require_once dirname(__FILE__).'/../../htdocs/core/lib/admin.lib.php';
+dolibarr_set_const($db, 'API_ENABLE_LOGIN_API', 1);
+
+
+dolibarr_set_const($db, 'MAIN_FIRST_REGISTRATION_OK_DATE', dol_print_date($now, 'dayhourlog', 'gmt'));
+dolibarr_set_const($db, 'BLOCKEDLOG_REGISTRATION_NAME', 'MyBigCompanyByPHPUnit');
+dolibarr_set_const($db, 'BLOCKEDLOG_REGISTRATION_EMAIL', 'mybigcompany@example.com');
+dolibarr_set_const($db, 'MAIN_INFO_SIREN', 'phpunit123');
+dolibarr_set_const($db, 'MAIN_INFO_SIRET', 'phpunit12312345');
+$sql = "DELETE FROM ".MAIN_DB_PREFIX."const WHERE name = 'blockedlog-1.end'";
+$db->query($sql);
+
+// Test there is no webhook enabled
+// TODO
+
 
 
 /**
@@ -111,29 +156,22 @@ class AllTests
 		$suite->addTestSuite('ImagesLibTest');
 		require_once dirname(__FILE__).'/FunctionsLibTest.php';
 		$suite->addTestSuite('FunctionsLibTest');
+		require_once dirname(__FILE__).'/TaxLibTest.php';
+		$suite->addTestSuite('TaxLibTest');
 		require_once dirname(__FILE__).'/Functions2LibTest.php';
 		$suite->addTestSuite('Functions2LibTest');
+		require_once dirname(__FILE__).'/FunctionsBELibTest.php';
+		$suite->addTestSuite('FunctionsBELibTest');
 		require_once dirname(__FILE__).'/ProfidLibTest.php';
 		$suite->addTestSuite('ProfidLibTest');
 		require_once dirname(__FILE__).'/XCalLibTest.php';
 		$suite->addTestSuite('XCalLibTest');
 
-		// Rules into source files content
-		require_once dirname(__FILE__).'/RepositoryTest.php';
-		$suite->addTestSuite('RepositoryTest');
-		require_once dirname(__FILE__).'/LangTest.php';
-		$suite->addTestSuite('LangTest');
-		require_once dirname(__FILE__).'/CodingSqlTest.php';
-		$suite->addTestSuite('CodingSqlTest');
-		require_once dirname(__FILE__).'/CodingPhpTest.php';
-		$suite->addTestSuite('CodingPhpTest');
-		require_once dirname(__FILE__).'/DoliDBTest.php';
-		$suite->addTestSuite('DoliDBTest');
-
 		require_once dirname(__FILE__).'/SecurityTest.php';
 		$suite->addTestSuite('SecurityTest');
 		require_once dirname(__FILE__).'/SecurityGETPOSTTest.php';
 		$suite->addTestSuite('SecurityGETPOSTTest');
+
 		require_once dirname(__FILE__).'/SecurityLoginTest.php';
 		$suite->addTestSuite('SecurityLoginTest');
 
@@ -179,6 +217,8 @@ class AllTests
 
 		require_once dirname(__FILE__).'/BOMTest.php';
 		$suite->addTestSuite('BOMTest');
+		require_once dirname(__FILE__).'/MoTest.php';
+		$suite->addTestSuite('MoTest');
 
 		require_once dirname(__FILE__).'/ContratTest.php';
 		$suite->addTestSuite('ContratTest');
@@ -208,6 +248,8 @@ class AllTests
 		$suite->addTestSuite('FactureRecTest');
 		require_once dirname(__FILE__).'/FactureTestRounding.php';
 		$suite->addTestSuite('FactureTestRounding');
+		require_once dirname(__FILE__).'/PaiementTest.php';
+		$suite->addTestSuite('PaiementTest');
 		require_once dirname(__FILE__).'/FactureFournisseurTest.php';
 		$suite->addTestSuite('FactureFournisseurTest');
 
@@ -250,6 +292,9 @@ class AllTests
 		$suite->addTestSuite('AccountingAccountTest');
 		require_once dirname(__FILE__).'/AssetModelTest.php';
 		$suite->addTestSuite('AssetModelTest');
+
+		require_once dirname(__FILE__).'/BlockedLogAndLNETest.php';
+		$suite->addTestSuite('BlockedLogAndLNETest');
 
 		// Rest
 		require_once dirname(__FILE__).'/RestAPIUserTest.php';
@@ -307,8 +352,24 @@ class AllTests
 		require_once dirname(__FILE__).'/WebsiteTest.php';
 		$suite->addTestSuite('WebsiteTest');
 
-		// At end because it's the longer
+		// --- At end because it's the longer
+
+		// Rules into source files content
+		require_once dirname(__FILE__).'/RepositoryTest.php';
+		$suite->addTestSuite('RepositoryTest');
+		require_once dirname(__FILE__).'/LangTest.php';
+		$suite->addTestSuite('LangTest');
+		require_once dirname(__FILE__).'/CodingSqlTest.php';
+		$suite->addTestSuite('CodingSqlTest');
+		require_once dirname(__FILE__).'/CodingPhpTest.php';
+		$suite->addTestSuite('CodingPhpTest');
+		require_once dirname(__FILE__).'/DoliDBTest.php';
+		$suite->addTestSuite('DoliDBTest');
+
+		// --- At very end, the LAST ONE.
+
 		// Also enabling and disabling modules is changing the context and global variables that changes behaviour of previous tests
+		// For example, this call init that run DDL functionsand break commit/rollback features.
 		require_once dirname(__FILE__).'/ModulesTest.php';
 		$suite->addTestSuite('ModulesTest');
 

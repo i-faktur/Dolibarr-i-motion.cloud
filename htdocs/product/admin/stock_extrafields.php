@@ -72,13 +72,13 @@ $textobject = $langs->transnoentitiesnoconv("Warehouses");
 
 llxHeader('', $langs->trans("StockSetup"), '', '', 0, 0, '', '', '', 'mod-product page-admin_stock_extrafields');
 
-$linkback = '<a href="'.DOL_URL_ROOT.'/admin/modules.php?restore_lastsearch_values=1">'.$langs->trans("BackToModuleList").'</a>';
+$linkback = '<a href="'.dolBuildUrl(DOL_URL_ROOT.'/admin/modules.php', ['restore_lastsearch_values' => 1]).'">'.img_picto($langs->trans("BackToModuleList"), 'back', 'class="pictofixedwidth"').'<span class="hideonsmartphone">'.$langs->trans("BackToModuleList").'</span></a>';
 print load_fiche_titre($langs->trans("StockSetup"), $linkback, 'title_setup');
 
 
 $head = stock_admin_prepare_head();
 
-print dol_get_fiche_head($head, 'attributes', $langs->trans("StockSetup"), -1, 'stock');
+print dol_get_fiche_head($head, 'attributes', $langs->trans("StockSetupExtraFields"), -1, 'stock');
 
 require DOL_DOCUMENT_ROOT.'/core/tpl/admin_extrafields_view.tpl.php';
 

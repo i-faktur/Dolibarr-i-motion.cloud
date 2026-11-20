@@ -36,15 +36,6 @@
 
 // Load Dolibarr environment
 require_once '../main.inc.php';
-require_once DOL_DOCUMENT_ROOT . '/core/lib/functions.lib.php';
-require_once DOL_DOCUMENT_ROOT . '/core/lib/functions2.lib.php';
-require_once DOL_DOCUMENT_ROOT . '/hrm/class/skill.class.php';
-require_once DOL_DOCUMENT_ROOT . '/hrm/class/job.class.php';
-require_once DOL_DOCUMENT_ROOT . '/hrm/class/evaluation.class.php';
-require_once DOL_DOCUMENT_ROOT . '/hrm/class/position.class.php';
-require_once DOL_DOCUMENT_ROOT . '/hrm/lib/hrm.lib.php';
-
-
 /**
  * @var Conf $conf
  * @var DoliDB $db
@@ -53,6 +44,15 @@ require_once DOL_DOCUMENT_ROOT . '/hrm/lib/hrm.lib.php';
  * @var Translate $langs
  * @var User $user
  */
+require_once DOL_DOCUMENT_ROOT . '/core/lib/functions.lib.php';
+require_once DOL_DOCUMENT_ROOT . '/core/lib/functions2.lib.php';
+require_once DOL_DOCUMENT_ROOT . '/hrm/class/skill.class.php';
+require_once DOL_DOCUMENT_ROOT . '/hrm/class/job.class.php';
+require_once DOL_DOCUMENT_ROOT . '/hrm/class/evaluation.class.php';
+require_once DOL_DOCUMENT_ROOT . '/hrm/class/position.class.php';
+require_once DOL_DOCUMENT_ROOT . '/hrm/lib/hrm.lib.php';
+
+$action = GETPOST('action');
 
 // Load translation files required by the page
 $langs->load('hrm');
@@ -63,7 +63,7 @@ $job = new Job($db);
 $permissiontoread = $user->hasRight('hrm', 'evaluation', 'read') || $user->hasRight('hrm', 'compare_advance', 'read');
 $permissiontoadd = 0;
 
-if (empty($conf->hrm->enabled)) {
+if (!isModEnabled('hrm')) {
 	accessforbidden();
 }
 if (!$permissiontoread || ($action === 'create' && !$permissiontoadd)) {
@@ -82,7 +82,7 @@ llxHeader('', $langs->trans('SkillComparison'), '', '', 0, 0, '', $css);
 $head = array();
 
 $h = 0;
-$head[$h][0] = $_SERVER["PHP_SELF"];
+$head[$h][0] = DOL_URL_ROOT.'/hrm/compare.php';
 $head[$h][1] = $langs->trans("SkillComparison");
 $head[$h][2] = 'compare';
 
@@ -151,7 +151,7 @@ $fk_usergroup1 = GETPOSTINT('fk_usergroup1');
 							print $form->select_dolgroups($fk_usergroup1, 'fk_usergroup1', 1);
 							?></td>
 						</tr>
-						<tr><td>&nbsp;</td></tr>
+						<tr><td></td><td></td></tr>
 						<tr>
 							<td><?php
 							print $langs->trans('group2ToCompare').'</td><td>';
@@ -160,7 +160,7 @@ $fk_usergroup1 = GETPOSTINT('fk_usergroup1');
 							?></td>
 						</tr>
 						<tr>
-							<td><STRONG><?php print $langs->trans('or'); ?></STRONG></td>
+							<td><b><?php print $langs->trans('or'); ?></b></td><td></td>
 						</tr>
 						<tr>
 							<td><?php
@@ -439,7 +439,7 @@ function mergeSkills($TSkill1, $TSkill2)
  */
 function displayUsersListWithPicto(&$TUser, $fk_usergroup = 0, $namelist = 'list-user')
 {
-	global $db, $langs, $conf, $form;
+	global $db, $langs, $conf, $form, $user;
 
 	$out = '';
 	if ($fk_usergroup > 0) {
@@ -451,6 +451,11 @@ function displayUsersListWithPicto(&$TUser, $fk_usergroup = 0, $namelist = 'list
 		LEFT JOIN " . MAIN_DB_PREFIX . "usergroup_user as ugu ON (u.rowid = ugu.fk_user)
 		WHERE u.statut > 0 AND ugu.entity = ".((int) $conf->entity);
 		$sql .= " AND ugu.fk_usergroup=" . ((int) $fk_usergroup);
+		// Without the permission to read all the assessments or to compare all the employees, a user only compares
+		// himself and the employees of his hierarchy (same rule as for the assessments).
+		if (!$user->hasRight('hrm', 'evaluation', 'readall') && !$user->hasRight('hrm', 'compare_advance', 'read')) {
+			$sql .= " AND u.rowid IN (".$db->sanitize(implode(',', $user->getAllChildIds(1))).")";
+		}
 
 		$res = $db->query($sql);
 		$out .= '<ul name="' . $namelist . '">';

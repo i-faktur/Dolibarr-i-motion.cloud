@@ -1,6 +1,6 @@
 <?php
 /* Copyright (C) 2011-2012 Laurent Destailleur  <eldy@users.sourceforge.net>
- * Copyright (C) 2024		MDW							<mdeweerd@users.noreply.github.com>
+ * Copyright (C) 2024-2026	MDW							<mdeweerd@users.noreply.github.com>
  * Copyright (C) 2024		Frédéric France			<frederic.france@free.fr>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -99,6 +99,9 @@ class RssParser
 	 */
 	private $current_namespace;
 
+	/**
+	 * @var array<array<string,string>|array<string,array<string,string>>>
+	 */
 	public $items = array();
 	/**
 	 * @var array<string,string>|array<string,array<string,string>>
@@ -364,20 +367,26 @@ class RssParser
 						return -1;
 					}
 
-					xml_set_object($xmlparser, $this);
-					// @phan-suppress-next-line PhanUndeclaredFunctionInCallable
-					xml_set_element_handler($xmlparser, 'feed_start_element', 'feed_end_element'); // @phpstan-ignore-line
-					// @phan-suppress-next-line PhanUndeclaredFunctionInCallable
-					xml_set_character_data_handler($xmlparser, 'feed_cdata'); // @phpstan-ignore-line
+					// Handlers given as callable arrays (xml_set_object() and handler names as strings are deprecated since PHP 8.4)
+					xml_set_element_handler($xmlparser, array($this, 'feed_start_element'), array($this, 'feed_end_element'));
+					xml_set_character_data_handler($xmlparser, array($this, 'feed_cdata'));
 
 					$status = xml_parse($xmlparser, $str, false);
 
-					xml_parser_free($xmlparser);
+					if (PHP_VERSION_ID < 80000) {
+						xml_parser_free($xmlparser);	// No effect since PHP 8.0, deprecated since PHP 8.5
+					}
 
 					$rss = $this;
 					//var_dump($status.' '.$rss->_format);exit;
 				} catch (Exception $e) {
 					$rss = null;
+				}
+
+				// The root element was not rss, rdf or feed (an HTML error page, an empty answer...): it is not a feed.
+				// Errors after the root element are tolerated, the items read before the error are kept.
+				if ($rss && empty($this->_format)) {
+					$rss = null;	// Error ErrorFailedToLoadRSSFile, and the answer is not saved into the cache
 				}
 			}
 		}
@@ -525,12 +534,21 @@ class RssParser
 				//var_dump($items);exit;
 			}
 
+			// The links of the feed are used as href: keep only http(s) links (a "javascript:" link would run in Dolibarr)
+			if (!empty($this->_link) && !preg_match('/^https?:\/\//i', $this->_link)) {
+				$this->_link = '';
+			}
+
 			$i = 0;
 
 			// Loop on each record
 			if (is_array($items)) {
 				foreach ($items as $item) {
 					//var_dump($item);exit;
+					if (is_array($item)) {
+						// Optional elements of an item, to avoid PHP warnings when they are missing
+						$item += array('link' => '', 'title' => '', 'description' => '', 'guid' => '', 'author' => '', 'author_name' => '');
+					}
 					if ($rss->_format == 'rss') {
 						if (getDolGlobalString('EXTERNALRSS_USE_SIMPLEXML')) {
 							$itemLink = sanitizeVal((string) $item->link);
@@ -574,6 +592,10 @@ class RssParser
 						print 'ErrorBadFeedFormat';
 					}
 
+					if (!preg_match('/^https?:\/\//i', $itemLink)) {
+						$itemLink = '';
+					}
+
 					// Add record to result array
 					$this->_rssarray[$i] = array(
 						'link' => $itemLink,
@@ -588,8 +610,8 @@ class RssParser
 
 					$i++;
 
-					if ($i > $maxNb) {
-						break; // We get all records we want
+					if ($maxNb > 0 && $i >= $maxNb) {
+						break; // We get all records we want (0 = no limit)
 					}
 				}
 			}
@@ -634,10 +656,10 @@ class RssParser
 				$this->feed_version = '1.0';
 			} elseif ($el == 'rss') {
 				$this->_format = 'rss';
-				$this->feed_version = $attrs['version'];
+				$this->feed_version = (string) ($attrs['version'] ?? '');
 			} elseif ($el == 'feed') {
 				$this->_format = 'atom';
-				$this->feed_version = $attrs['version'];
+				$this->feed_version = (string) ($attrs['version'] ?? '');
 				$this->inchannel = true;
 			}
 			return;
@@ -811,11 +833,14 @@ class RssParser
 			}
 		} else {
 			if (!empty($this->initem)) {
-				$this->concat($this->current_item[$el], $text);
+				// @phpstan-ignore-next-line argument.type
+				$this->concat($this->current_item[$el], $text);  // @phan-suppress-current-line PhanTypeMismatchArgument
 			} elseif (!empty($this->intextinput)) {
-				$this->concat($this->textinput[$el], $text);
+				// @phpstan-ignore-next-line argument.type
+				$this->concat($this->textinput[$el], $text);  // @phan-suppress-current-line PhanTypeMismatchArgument
 			} elseif (!empty($this->inimage)) {
-				$this->concat($this->image[$el], $text);
+				// @phpstan-ignore-next-line argument.type
+				$this->concat($this->image[$el], $text);  // @phan-suppress-current-line PhanTypeMismatchArgument
 			} elseif (!empty($this->inchannel)) {
 				$this->concat($this->channel[$el], $text);
 			}
